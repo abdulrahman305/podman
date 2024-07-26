@@ -10,15 +10,25 @@ podman\-systemd.unit - systemd units using Podman Quadlet
 
 ### Podman rootful unit search path
 
-Quadlet files for the root user can be placed in the following two directories:
+Quadlet files for the root user can be placed in the following directories ordered in precedence. Meaning duplicate named quadlets found under /run take precedence over ones in /etc, as well as those in /usr:
 
- * /etc/containers/systemd/
- * /usr/share/containers/systemd/
+Temporary quadlets, usually used for testing:
+
+* /run/containers/systemd/
+
+System administrator's defined quadlets:
+
+* /etc/containers/systemd/
+
+Distribution defined quadlets:
+
+* /usr/share/containers/systemd/
 
 ### Podman rootless unit search path
 
 Quadlet files for non-root users can be placed in the following directories
 
+ * $XDG_RUNTIME_DIR/containers/systemd/
  * $XDG_CONFIG_HOME/containers/systemd/ or ~/.config/containers/systemd/
  * /etc/containers/systemd/users/$(UID)
  * /etc/containers/systemd/users/
@@ -306,6 +316,7 @@ Valid options for `[Container]` are listed below:
 | SecurityLabelNested=true             | --security-opt label=nested                          |
 | SecurityLabelType=spc_t              | --security-opt label=type:spc_t                      |
 | ShmSize=100m                         | --shm-size=100m                                      |
+| StopSignal=SIGINT                    | --stop-signal=SIGINT                                 |
 | StopTimeout=20                       | --stop-timeout=20                                    |
 | SubGIDMap=gtest                      | --subgidname=gtest                                   |
 | SubUIDMap=utest                      | --subuidname=utest                                   |
@@ -730,6 +741,12 @@ Set the label process type for the container processes.
 Size of /dev/shm.
 
 This is equivalent to the Podman `--shm-size` option and generally has the form `number[unit]`
+
+### `StopSignal=`
+
+Signal to stop a container. Default is **SIGTERM**.
+
+This is equivalent to the Podman `--stop-signal` option
 
 ### `StopTimeout=`
 
@@ -1415,7 +1432,7 @@ Valid options for `[Build]` are listed below:
 Add an image *annotation* (e.g. annotation=*value*) to the image metadata. Can be used multiple
 times.
 
-This is equivalant to the `--annotation` option of `podman build`.
+This is equivalent to the `--annotation` option of `podman build`.
 
 ### `Arch=`
 
@@ -1624,7 +1641,7 @@ particularly interesting when using special options to control image pulls.
 Note: The generated service have a dependency on `network-online.target` assuring the network is reachable if
 an image needs to be pulled.
 If the image service needs to run without available network (e.g. early in boot), the requirement can be
-overriden simply by adding an empty `After=` in the unit file. This will unset all previously set After's.
+overridden simply by adding an empty `After=` in the unit file. This will unset all previously set After's.
 
 Valid options for `[Image]` are listed below:
 

@@ -94,7 +94,7 @@ The installer includes a C program that checks the installation of the
 pre-required virtualization providers (WSL or Hyper-V). Building this program
 requires the
 [Microsoft C/C++ compiler](https://learn.microsoft.com/en-us/cpp/build/building-on-the-command-line?view=msvc-170) and the
-[PowerShell Moduel VSSetup](https://github.com/microsoft/vssetup.powershell):
+[PowerShell Module VSSetup](https://github.com/microsoft/vssetup.powershell):
 
 1. Download the Build Tools for Visual Studio 2022 installer
 ```pwsh
@@ -362,11 +362,19 @@ set the bundle variables `MachineProvider` (`wsl` or `hyperv`), `WSLCheckbox`
 otherwise):
 
 ```pwsh
-contrib\win-installer\podman-5.1.0-dev-setup.exe /install /log podman-setup.log /quiet MachineProvider=wsl WSLCheckbox=0 HyperVCheckbox=0
+contrib\win-installer\podman-5.1.0-dev-setup.exe /install `
+                      /log podman-setup.log /quiet `
+                      MachineProvider=wsl WSLCheckbox=0 HyperVCheckbox=0
 ```
 
-:information_source: The `winmake.ps1` target `installertest` automatically
-tests installing and uninstalling Podman.
+#### Run the Windows installer automated tests
+
+The following command executes a number of tests of the windows installer. Running
+it requires an administrator terminal.
+
+```pwsh
+.\winmake.ps1 installertest
+```
 
 ### Build and test the standalone `podman.msi` file
 

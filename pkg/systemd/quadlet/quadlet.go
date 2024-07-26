@@ -20,6 +20,8 @@ const (
 	// github.com/containers/podman/v5/libpod/define.AutoUpdateLabel
 	// but it is causing bloat
 	autoUpdateLabel = "io.containers.autoupdate"
+	// Directory for temporary Quadlet files (sysadmin owned)
+	UnitDirTemp = "/run/containers/systemd"
 	// Directory for global Quadlet files (sysadmin owned)
 	UnitDirAdmin = "/etc/containers/systemd"
 	// Directory for global Quadlet files (distro owned)
@@ -143,6 +145,7 @@ const (
 	KeySecurityLabelType     = "SecurityLabelType"
 	KeySetWorkingDirectory   = "SetWorkingDirectory"
 	KeyShmSize               = "ShmSize"
+	KeyStopSignal            = "StopSignal"
 	KeyStopTimeout           = "StopTimeout"
 	KeySubGIDMap             = "SubGIDMap"
 	KeySubnet                = "Subnet"
@@ -242,6 +245,7 @@ var (
 		KeySecurityLabelNested:   true,
 		KeySecurityLabelType:     true,
 		KeyShmSize:               true,
+		KeyStopSignal:            true,
 		KeyStopTimeout:           true,
 		KeySubGIDMap:             true,
 		KeySubUIDMap:             true,
@@ -841,6 +845,10 @@ func ConvertContainer(container *parser.UnitFile, names map[string]string, isUse
 
 	if err := handlePod(container, service, ContainerGroup, podsInfoMap, podman); err != nil {
 		return nil, err
+	}
+
+	if stopSignal, ok := container.Lookup(ContainerGroup, KeyStopSignal); ok && len(stopSignal) > 0 {
+		podman.add("--stop-signal", stopSignal)
 	}
 
 	if stopTimeout, ok := container.Lookup(ContainerGroup, KeyStopTimeout); ok && len(stopTimeout) > 0 {
