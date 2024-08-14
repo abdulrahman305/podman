@@ -285,6 +285,13 @@ case "$PRIV_NAME" in
     *) die_unknown PRIV_NAME
 esac
 
+# Root user namespace
+for which in uid gid;do
+    if ! grep -qE '^containers:' /etc/sub$which; then
+        echo 'containers:10000000:1048576' >>/etc/sub$which
+    fi
+done
+
 # FIXME! experimental workaround for #16973, the "lookup cdn03.quay.io" flake.
 #
 # If you are reading this on or after April 2023:
@@ -386,7 +393,6 @@ case "$TEST_FLAVOR" in
         ;& # Continue with next item
     apiv2)
         msg "Installing previously downloaded/cached packages"
-        showrun dnf install -y $PACKAGE_DOWNLOAD_DIR/python3*.rpm
         virtualenv .venv/requests
         source .venv/requests/bin/activate
         showrun pip install --upgrade pip
@@ -443,11 +449,8 @@ case "$TEST_FLAVOR" in
         fi
         remove_packaged_podman_files
         showrun make install PREFIX=/usr ETCDIR=/etc
-        # machine-os image changes too frequently, can't be precached
-        # FIXME: I don't think we can use version.go, because of chicken-egg
-        # problem when that gets bumped. Ideas welcome.
-        $LCR cache podman/machine-os:5.2
-        install_test_configs
+        # machine-os image changes too frequently, can't use image cache
+        install_test_configs nocache
         ;;
     swagger)
         showrun make .install.swagger

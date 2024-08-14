@@ -1106,6 +1106,9 @@ func (c *Container) init(ctx context.Context, retainRetries bool) error {
 	c.state.RestoreLog = ""
 	c.state.ExitCode = 0
 	c.state.Exited = false
+	// Reset any previous errors as we try to init it again, either it works and we don't
+	// want to keep an old error around or a new error will be written anyway.
+	c.state.Error = ""
 	c.state.State = define.ContainerStateCreated
 	c.state.StoppedByUser = false
 	c.state.RestartPolicyMatch = false
@@ -1922,6 +1925,11 @@ func (c *Container) mountNamedVolume(v *ContainerNamedVolume, mountpoint string)
 			getOptions := copier.GetOptions{
 				KeepDirectoryNames: false,
 			}
+			// If the volume is idmapped, we need to "undo" the idmapping
+			if slices.Contains(v.Options, "idmap") {
+				getOptions.UIDMap = c.config.IDMappings.UIDMap
+				getOptions.GIDMap = c.config.IDMappings.GIDMap
+			}
 			errChan <- copier.Get(srcDir, "", getOptions, []string{"/."}, writer)
 		}()
 
@@ -1929,6 +1937,8 @@ func (c *Container) mountNamedVolume(v *ContainerNamedVolume, mountpoint string)
 		// the volume.
 		copyOpts := copier.PutOptions{}
 		if err := copier.Put(volMount, "", copyOpts, reader); err != nil {
+			// consume the reader otherwise the goroutine will block
+			_, _ = io.Copy(io.Discard, reader)
 			err2 := <-errChan
 			if err2 != nil {
 				logrus.Errorf("Streaming contents of container %s directory for volume copy-up: %v", c.ID(), err2)
@@ -2045,6 +2055,11 @@ func (c *Container) cleanup(ctx context.Context) error {
 	var lastError error
 
 	logrus.Debugf("Cleaning up container %s", c.ID())
+
+	// Ensure we are not killed half way through cleanup
+	// which can leave us in a bad state.
+	shutdown.Inhibit()
+	defer shutdown.Uninhibit()
 
 	// Remove healthcheck unit/timer file if it execs
 	if c.config.HealthCheckConfig != nil {
@@ -2374,7 +2389,7 @@ func (c *Container) setupOCIHooks(ctx context.Context, config *spec.Spec) (map[s
 // the container's mountpoint directly from the storage.
 // Otherwise, it returns an intermediate mountpoint that is accessible to anyone.
 func (c *Container) getRootPathForOCI() (string, error) {
-	if hasCurrentUserMapped(c) {
+	if hasCurrentUserMapped(c) || c.config.RootfsMapping != nil {
 		return c.state.Mountpoint, nil
 	}
 	return c.getIntermediateMountpointUser()

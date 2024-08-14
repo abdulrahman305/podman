@@ -33,7 +33,7 @@ env:
     DEBIAN_NAME: "debian-13"
 
     # Image identifiers
-    IMAGE_SUFFIX: "c20240708t152000z-f40f39d13"
+    IMAGE_SUFFIX: "c20240805t173227z-f40f39d13"
 
     # EC2 images
     FEDORA_AMI: "fedora-aws-${IMAGE_SUFFIX}"
@@ -374,7 +374,7 @@ bindings_task:
     only_if: >-
         $CIRRUS_PR == '' ||
         $CIRRUS_CHANGE_TITLE =~ '.*CI:ALL.*' ||
-        changesInclude('.cirrus.yml', 'Makefile', 'contrib/cirrus/**', 'vendor/**', 'test/tools/**', 'hack/**', 'version/rawversion/*') ||
+        changesInclude('.cirrus.yml', 'Makefile', 'contrib/cirrus/**', 'vendor/**', 'test/tools/**', 'test/registries*.conf', 'hack/**', 'version/rawversion/*') ||
         changesInclude('pkg/bindings/test/**') ||
         (changesInclude('**/*.go', '**/*.c', '**/*.h') && !changesIncludeOnly('test/**', 'pkg/machine/e2e/**'))
     depends_on: &build
@@ -500,7 +500,7 @@ docker-py_test_task:
     only_if: >-
         $CIRRUS_PR == '' ||
         $CIRRUS_CHANGE_TITLE =~ '.*CI:ALL.*' ||
-        changesInclude('.cirrus.yml', 'Makefile', 'contrib/cirrus/**', 'vendor/**', 'test/tools/**', 'hack/**', 'version/rawversion/*') ||
+        changesInclude('.cirrus.yml', 'Makefile', 'contrib/cirrus/**', 'vendor/**', 'test/tools/**', 'test/registries*.conf', 'hack/**', 'version/rawversion/*') ||
         changesInclude('test/python/**') ||
         (changesInclude('**/*.go', '**/*.c', '**/*.h') && !changesIncludeOnly('test/**', 'pkg/machine/e2e/**'))
     depends_on: *build
@@ -527,7 +527,7 @@ unit_test_task:
     only_if: >-
         $CIRRUS_PR == '' ||
         $CIRRUS_CHANGE_TITLE =~ '.*CI:ALL.*' ||
-        changesInclude('.cirrus.yml', 'Makefile', 'contrib/cirrus/**', 'vendor/**', 'test/tools/**', 'hack/**', 'version/rawversion/*') ||
+        changesInclude('.cirrus.yml', 'Makefile', 'contrib/cirrus/**', 'vendor/**', 'test/tools/**', 'test/registries*.conf', 'hack/**', 'version/rawversion/*') ||
         changesInclude('**/*_test.go') ||
         (changesInclude('**/*.go', '**/*.c', '**/*.h') && !changesIncludeOnly('test/**', 'pkg/machine/e2e/**'))
     depends_on: *build
@@ -557,8 +557,8 @@ apiv2_test_task:
     only_if: >-
         $CIRRUS_PR == '' ||
         $CIRRUS_CHANGE_TITLE =~ '.*CI:ALL.*' ||
-        changesInclude('.cirrus.yml', 'Makefile', 'contrib/cirrus/**', 'vendor/**', 'test/tools/**', 'hack/**', 'version/rawversion/*') ||
-        changesInclude('test/apiv2/**') ||
+        changesInclude('.cirrus.yml', 'Makefile', 'contrib/cirrus/**', 'vendor/**', 'test/tools/**', 'test/registries*.conf', 'hack/**', 'version/rawversion/*') ||
+        changesInclude('test/apiv2/**', 'test/python/**') ||
         (changesInclude('**/*.go', '**/*.c', '**/*.h') && !changesIncludeOnly('test/**', 'pkg/machine/e2e/**'))
     depends_on: *build
     gce_instance: *standardvm
@@ -589,7 +589,7 @@ compose_test_task:
     only_if: >-
         $CIRRUS_PR == '' ||
         $CIRRUS_CHANGE_TITLE =~ '.*CI:ALL.*' ||
-        changesInclude('.cirrus.yml', 'Makefile', 'contrib/cirrus/**', 'vendor/**', 'test/tools/**', 'hack/**', 'version/rawversion/*') ||
+        changesInclude('.cirrus.yml', 'Makefile', 'contrib/cirrus/**', 'vendor/**', 'test/tools/**', 'test/registries*.conf', 'hack/**', 'version/rawversion/*') ||
         changesInclude('test/compose/**') ||
         (changesInclude('**/*.go', '**/*.c', '**/*.h') && !changesIncludeOnly('test/**', 'pkg/machine/e2e/**'))
     depends_on: *build
@@ -621,7 +621,7 @@ local_integration_test_task: &local_integration_test_task
     only_if: &only_if_int_test >-
         $CIRRUS_PR == '' ||
         $CIRRUS_CHANGE_TITLE =~ '.*CI:ALL.*' ||
-        changesInclude('.cirrus.yml', 'Makefile', 'contrib/cirrus/**', 'vendor/**', 'test/tools/**', 'hack/**', 'version/rawversion/*') ||
+        changesInclude('.cirrus.yml', 'Makefile', 'contrib/cirrus/**', 'vendor/**', 'test/tools/**', 'test/registries*.conf', 'hack/**', 'version/rawversion/*') ||
         changesInclude('test/e2e/**', 'test/utils/**') ||
         (changesInclude('**/*.go', '**/*.c', '**/*.h') && !changesIncludeOnly('test/**', 'pkg/machine/e2e/**'))
     depends_on: *build
@@ -715,7 +715,7 @@ podman_machine_task:
     only_if: &only_if_machine_test >-
         $CIRRUS_PR == '' ||
         $CIRRUS_CHANGE_TITLE =~ '.*CI:ALL.*' ||
-        changesInclude('.cirrus.yml', 'Makefile', 'contrib/cirrus/**', 'vendor/**', 'test/tools/**', 'hack/**', 'version/rawversion/*') ||
+        changesInclude('.cirrus.yml', 'Makefile', 'contrib/cirrus/**', 'vendor/**', 'test/tools/**', 'test/registries*.conf', 'hack/**', 'version/rawversion/*') ||
         changesInclude('cmd/podman/machine/**', 'pkg/machine/**', '**/*machine*.go')
     depends_on: *build
     ec2_instance:
@@ -790,15 +790,15 @@ podman_machine_mac_task:
     persistent_worker: *mac_pw
     env:
         <<: *mac_env
-        # Consumed by podman-machine ginkgo tests
-        CONTAINERS_MACHINE_PROVIDER: "applehv"
-        # TODO: Should not require a special image, for now it does.
-        # Simply remove the line below when a mac image is GA.
-        # MACHINE_IMAGE: "https://fedorapeople.org/groups/podman/testing/applehv/arm64/fedora-coreos-38.20230925.dev.0-applehv.aarch64.raw.gz"
-        # Values necessary to populate std_name_fmt alias
-        TEST_FLAVOR: "machine-mac"
         DISTRO_NV: "darwin"
         PRIV_NAME: "rootless"  # intended use-case
+    matrix:
+        - env:
+            # See contrib/cirrus/mac_runner.sh
+            TEST_FLAVOR: "machine-applehv"
+        - env:
+            # See contrib/cirrus/mac_runner.sh
+            TEST_FLAVOR: "machine-libkrun"
     clone_script:  # artifacts from osx_alt_build_task
         - mkdir -p $CIRRUS_WORKING_DIR
         - cd $CIRRUS_WORKING_DIR
@@ -838,7 +838,7 @@ local_system_test_task: &local_system_test_task
     only_if: &only_if_system_test >-
         $CIRRUS_PR == '' ||
         $CIRRUS_CHANGE_TITLE =~ '.*CI:ALL.*' ||
-        changesInclude('.cirrus.yml', 'Makefile', 'contrib/cirrus/**', 'vendor/**', 'test/tools/**', 'hack/**', 'version/rawversion/*') ||
+        changesInclude('.cirrus.yml', 'Makefile', 'contrib/cirrus/**', 'vendor/**', 'test/tools/**', 'test/registries*.conf', 'hack/**', 'version/rawversion/*') ||
         changesInclude('test/system/**') ||
         (changesInclude('**/*.go', '**/*.c', '**/*.h') && !changesIncludeOnly('test/**', 'pkg/machine/e2e/**'))
     depends_on: *build
@@ -930,7 +930,7 @@ farm_test_task:
     only_if: >-
         $CIRRUS_PR == '' ||
         $CIRRUS_CHANGE_TITLE =~ '.*CI:ALL.*' ||
-        changesInclude('.cirrus.yml', 'Makefile', 'contrib/cirrus/**', 'vendor/**', 'test/tools/**', 'hack/**', 'version/rawversion/*') ||
+        changesInclude('.cirrus.yml', 'Makefile', 'contrib/cirrus/**', 'vendor/**', 'test/tools/**', 'test/registries*.conf', 'hack/**', 'version/rawversion/*') ||
         changesInclude('test/farm/**', 'test/system/*.bash') ||
         (changesInclude('**/*.go', '**/*.c', '**/*.h') && !changesIncludeOnly('test/**', 'pkg/machine/e2e/**'))
     depends_on: *build
@@ -954,7 +954,7 @@ buildah_bud_test_task:
     only_if: >-
         $CIRRUS_PR == '' ||
         $CIRRUS_CHANGE_TITLE =~ '.*CI:ALL.*' ||
-        changesInclude('.cirrus.yml', 'Makefile', 'contrib/cirrus/**', 'vendor/**', 'test/tools/**', 'hack/**', 'version/rawversion/*') ||
+        changesInclude('.cirrus.yml', 'Makefile', 'contrib/cirrus/**', 'vendor/**', 'test/tools/**', 'test/registries*.conf', 'hack/**', 'version/rawversion/*') ||
         changesInclude('**/*build*.go', 'test/buildah-bud/**')
     depends_on: *build
     env:
@@ -982,7 +982,7 @@ upgrade_test_task:
     only_if: >-
         $CIRRUS_PR == '' ||
         $CIRRUS_CHANGE_TITLE =~ '.*CI:ALL.*' ||
-        changesInclude('.cirrus.yml', 'Makefile', 'contrib/cirrus/**', 'vendor/**', 'test/tools/**', 'hack/**', 'version/rawversion/*') ||
+        changesInclude('.cirrus.yml', 'Makefile', 'contrib/cirrus/**', 'vendor/**', 'test/tools/**', 'test/registries*.conf', 'hack/**', 'version/rawversion/*') ||
         changesInclude('test/upgrade/**', 'test/system/*.bash') ||
         (changesInclude('**/*.go', '**/*.c', '**/*.h') && !changesIncludeOnly('test/**', 'pkg/machine/e2e/**'))
     depends_on: *build

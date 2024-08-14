@@ -411,16 +411,30 @@ _EOF
 # Occasionally a remnant storage container is left behind which causes
 # podman play kube --replace to fail. This tests created a conflicting
 # storage container name using buildah to make sure --replace, still
-# functions proplery by removing the storage container.
+# functions properly by removing the storage container.
 @test "podman kube play --replace external storage" {
-    _write_test_yaml
+    _write_test_yaml command="top"
 
     run_podman play kube $TESTYAML
-    # Force removal of container
+
+    # Pod container exists
+    run_podman ps -a --format '=={{.Names}}=={{.Status}}=='
+    assert "$output" =~ "==${PODCTRNAME}==Up " "Pod container created"
+
+    # Force removal of container, and confirm that it no longer exists
     run_podman rm --force -t0 $PODCTRNAME
+    assert "$output" = "$PODCTRNAME" "Confirmation that container was removed"
+    run_podman ps -a --external --format '=={{.Names}}=={{.Status}}=='
+    assert "$output" !~ "$PODCTRNAME" "Pod container gone"
+
     # Create external container using buildah with same name
     buildah from --name $PODCTRNAME $IMAGE
-    # --replace deletes the buildah container and replace it with new one
+    # Confirm that we now have an external (Storage) container by that name
+    run_podman ps -a --external --format '=={{.Names}}=={{.Status}}=='
+    assert "$output" =~ "==${PODCTRNAME}==Storage==" "Storage (external) container created"
+
+    # --replace deletes the buildah container and replace it with new one.
+    # Prior to #20025, this would fail with "container name is in use"
     run_podman play kube --replace $TESTYAML
 
     run_podman pod rm -t 0 -f $PODNAME
@@ -988,29 +1002,60 @@ _EOF
 }
 
 @test "podman play with automount volume" {
-    imgname="automount-test-$(safename)"
+    imgname1="automount-img1-$(safename)"
+    imgname2="automount-img2-$(safename)"
     podname="p-$(safename)"
     ctrname="c-$(safename)"
+    ctrname_not_mounted="c-not-mounted-$(safename)"
 
-    cat >$PODMAN_TMPDIR/Containerfile <<EOF
+    cat >$PODMAN_TMPDIR/Containerfile1 <<EOF
 FROM $IMAGE
-RUN mkdir /test1 /test2
-RUN touch /test1/a /test1/b /test1/c
-RUN touch /test2/asdf /test2/ejgre /test2/lteghe
+RUN mkdir /test1 /test_same && \
+    touch /test1/a /test1/b /test1/c && \
+    echo "I am from test1 image" > /test_same/hello_world
 VOLUME /test1
-VOLUME /test2
+VOLUME /test_same
 EOF
 
-    run_podman build -t $imgname -f $PODMAN_TMPDIR/Containerfile
+    cat >$PODMAN_TMPDIR/Containerfile2 <<EOF
+FROM $IMAGE
+RUN mkdir /test2 /test_same && \
+    touch /test2/asdf /test2/ejgre /test2/lteghe && \
+    echo "I am from test2 image" > /test_same/hello_world
+VOLUME /test2
+VOLUME /test_same
+EOF
 
-    fname="/tmp/play_kube_wait_$(random_string 6).yaml"
-    echo "
+    run_podman build -t $imgname1 -f $PODMAN_TMPDIR/Containerfile1
+    run_podman build -t $imgname2 -f $PODMAN_TMPDIR/Containerfile2
+
+    _write_test_yaml command=top name=$podname ctrname=$ctrname
+    run_podman kube play --annotation "io.podman.annotations.kube.image.volumes.mount/$ctrname=$imgname1" $TESTYAML
+
+    run_podman run --rm $imgname1 ls -x /test1
+    assert "$output" = "a  b  c" "ls /test1 on image"
+    run_out_test1="$output"
+    run_podman exec $podname-$ctrname ls -x /test1
+    assert "$output" = "$run_out_test1" "matching ls run/exec volume path test1"
+
+    run_podman run --rm $imgname1 cat /test_same/hello_world
+    assert "$output" = "I am from test1 image"  "cat /test_same/hello_world on image"
+    run_out_hello_world="$output"
+    run_podman exec $podname-$ctrname cat /test_same/hello_world
+    assert "$output" = "$run_out_hello_world" "matching cat /test_same/hello_world volume path test_same"
+
+    run_podman kube down $TESTYAML
+
+    fname="/$PODMAN_TMPDIR/play_kube_wait_$(random_string 6).yaml"
+    cat >$fname <<EOF
 apiVersion: v1
 kind: Pod
 metadata:
   labels:
     app: test
   name: $podname
+  annotations:
+    io.podman.annotations.kube.image.volumes.mount/$ctrname: $imgname1;$imgname2
 spec:
   restartPolicy: Never
   containers:
@@ -1018,24 +1063,31 @@ spec:
       image: $IMAGE
       command:
       - top
-" > $fname
+    - name: $ctrname_not_mounted
+      image: $IMAGE
+      command:
+      - top
+EOF
 
-    run_podman kube play --annotation "io.podman.annotations.kube.image.volumes.mount/$ctrname=$imgname" $fname
+    run_podman kube play $fname
 
-    run_podman run --rm $imgname ls -x /test1
-    assert "$output" = "a  b  c" "ls /test1 on image"
-    run_out_test1="$output"
-    run_podman exec $podname-$ctrname ls -x /test1
-    assert "$output" = "$run_out_test1" "matching ls run/exec volume path test1"
+    run_podman exec "$podname-$ctrname" ls -x /test1
+    assert "a  b  c" "ls /test1 inside container"
 
-    run_podman run --rm $imgname ls -x /test2
-    assert "$output" = "asdf    ejgre   lteghe"  "ls /test2 on image"
-    run_out_test2="$output"
-    run_podman exec $podname-$ctrname ls -x /test2
-    assert "$output" = "$run_out_test2" "matching ls run/exec volume path test2"
+    run_podman exec "$podname-$ctrname" ls -x /test2
+    assert "asdf    ejgre   lteghe" "ls /test2 inside container"
+
+    run_podman exec "$podname-$ctrname" cat /test_same/hello_world
+    assert "I am from test2 image" "cat /test_same/hello_world inside container"
+
+    run_podman 1 exec "$podname-$ctrname" touch /test1/readonly
+    assert "$output" =~ "Read-only file system" "image mounted as readonly"
+
+    run_podman exec "$podname-$ctrname_not_mounted" ls /
+    assert "$output" !~ "test" "No volume should be mounted in no-mount container"
 
     run_podman kube down $fname
-    run_podman rmi $imgname
+    run_podman rmi $imgname1 $imgname2
 }
 
 @test "podman kube restore user namespace" {

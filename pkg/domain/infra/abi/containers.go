@@ -34,6 +34,7 @@ import (
 	"github.com/containers/podman/v5/pkg/specgenutil"
 	"github.com/containers/podman/v5/pkg/util"
 	"github.com/containers/storage"
+	"github.com/containers/storage/types"
 	"github.com/sirupsen/logrus"
 )
 
@@ -1266,6 +1267,10 @@ func (ic *ContainerEngine) ContainerLogs(ctx context.Context, namesOrIds []strin
 func (ic *ContainerEngine) ContainerCleanup(ctx context.Context, namesOrIds []string, options entities.ContainerCleanupOptions) ([]*entities.ContainerCleanupReport, error) {
 	containers, err := getContainers(ic.Libpod, getContainersOptions{all: options.All, latest: options.Latest, names: namesOrIds})
 	if err != nil {
+		// cleanup command spawned by conmon lost race as another process already removed the ctr
+		if errors.Is(err, define.ErrNoSuchCtr) {
+			return nil, nil
+		}
 		return nil, err
 	}
 	reports := []*entities.ContainerCleanupReport{}
@@ -1275,13 +1280,13 @@ func (ic *ContainerEngine) ContainerCleanup(ctx context.Context, namesOrIds []st
 
 		if options.Exec != "" {
 			if options.Remove {
-				if err := ctr.ExecRemove(options.Exec, false); err != nil {
-					return nil, err
-				}
+				err = ctr.ExecRemove(options.Exec, false)
 			} else {
-				if err := ctr.ExecCleanup(options.Exec); err != nil {
-					return nil, err
-				}
+				err = ctr.ExecCleanup(options.Exec)
+			}
+			// If ErrNoSuchExecSession then the exec session was already removed so do not report an error.
+			if err != nil && !errors.Is(err, define.ErrNoSuchExecSession) {
+				return nil, err
 			}
 			return []*entities.ContainerCleanupReport{}, nil
 		}
@@ -1289,12 +1294,13 @@ func (ic *ContainerEngine) ContainerCleanup(ctx context.Context, namesOrIds []st
 		if options.Remove && !ctr.ShouldRestart(ctx) {
 			var timeout *uint
 			err = ic.Libpod.RemoveContainer(ctx, ctr.Container, false, true, timeout)
-			if err != nil {
+			if err != nil && !errors.Is(err, define.ErrNoSuchCtr) {
 				report.RmErr = fmt.Errorf("failed to clean up and remove container %v: %w", ctr.ID(), err)
 			}
 		} else {
 			err := ctr.Cleanup(ctx)
-			if err != nil {
+			// ignore error if ctr is removed or cannot be cleaned up, likely the ctr was already restarted by another process
+			if err != nil && !errors.Is(err, define.ErrNoSuchCtr) && !errors.Is(err, define.ErrCtrStateInvalid) {
 				report.CleanErr = fmt.Errorf("failed to clean up container %v: %w", ctr.ID(), err)
 			}
 		}
@@ -1302,7 +1308,7 @@ func (ic *ContainerEngine) ContainerCleanup(ctx context.Context, namesOrIds []st
 		if options.RemoveImage {
 			_, imageName := ctr.Image()
 			imageEngine := ImageEngine{Libpod: ic.Libpod}
-			_, rmErrors := imageEngine.Remove(ctx, []string{imageName}, entities.ImageRemoveOptions{})
+			_, rmErrors := imageEngine.Remove(ctx, []string{imageName}, entities.ImageRemoveOptions{Ignore: true})
 			report.RmiErr = errorhandling.JoinErrors(rmErrors)
 		}
 
@@ -1367,6 +1373,11 @@ func (ic *ContainerEngine) ContainerMount(ctx context.Context, nameOrIDs []strin
 	for _, ctr := range containers {
 		report := entities.ContainerMountReport{Id: ctr.ID()}
 		report.Path, report.Err = ctr.Mount()
+		if options.All &&
+			(errors.Is(report.Err, define.ErrNoSuchCtr) ||
+				errors.Is(report.Err, define.ErrCtrRemoved)) {
+			continue
+		}
 		reports = append(reports, &report)
 	}
 	if len(reports) > 0 {
@@ -1381,6 +1392,9 @@ func (ic *ContainerEngine) ContainerMount(ctx context.Context, nameOrIDs []strin
 	for _, sctr := range storageCtrs {
 		mounted, path, err := ic.Libpod.IsStorageContainerMounted(sctr.ID)
 		if err != nil {
+			if errors.Is(err, types.ErrContainerUnknown) {
+				continue
+			}
 			return nil, err
 		}
 
@@ -1405,6 +1419,10 @@ func (ic *ContainerEngine) ContainerMount(ctx context.Context, nameOrIDs []strin
 	for _, ctr := range containers {
 		mounted, path, err := ctr.Mounted()
 		if err != nil {
+			if errors.Is(err, define.ErrNoSuchCtr) ||
+				errors.Is(err, define.ErrCtrRemoved) {
+				continue
+			}
 			return nil, err
 		}
 

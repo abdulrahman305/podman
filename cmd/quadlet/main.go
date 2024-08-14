@@ -34,10 +34,6 @@ var (
 	versionFlag bool // True if -version is used
 )
 
-const (
-	SystemUserDirLevel = 5
-)
-
 var (
 	// data saved between logToKmsg calls
 	noKmsg   = false
@@ -57,6 +53,12 @@ var (
 		".build":     3,
 		".pod":       5,
 	}
+)
+
+var (
+	unitDirAdminUser         string
+	resolvedUnitDirAdminUser string
+	systemUserDirLevel       int
 )
 
 // We log directly to /dev/kmsg, because that is the only way to get information out
@@ -114,6 +116,14 @@ func getUnitDirs(rootless bool) []string {
 	// Allow overriding source dir, this is mainly for the CI tests
 	unitDirsEnv := os.Getenv("QUADLET_UNIT_DIRS")
 	dirs := make([]string, 0)
+
+	unitDirAdminUser = filepath.Join(quadlet.UnitDirAdmin, "users")
+	var err error
+	if resolvedUnitDirAdminUser, err = filepath.EvalSymlinks(unitDirAdminUser); err != nil {
+		Debugf("Error occurred resolving path %q: %s", unitDirAdminUser, err)
+		resolvedUnitDirAdminUser = unitDirAdminUser
+	}
+	systemUserDirLevel = len(strings.Split(resolvedUnitDirAdminUser, string(os.PathSeparator)))
 
 	if len(unitDirsEnv) > 0 {
 		for _, eachUnitDir := range strings.Split(unitDirsEnv, ":") {
@@ -185,10 +195,10 @@ func appendSubPaths(dirs []string, path string, isUserFlag bool, filterPtr func(
 func nonNumericFilter(_path string, isUserFlag bool) bool {
 	// when running in rootless, recursive walk directories that are non numeric
 	// ignore sub dirs under the `users` directory which correspond to a user id
-	if strings.Contains(_path, filepath.Join(quadlet.UnitDirAdmin, "users")) {
+	if strings.HasPrefix(_path, resolvedUnitDirAdminUser) {
 		listDirUserPathLevels := strings.Split(_path, string(os.PathSeparator))
-		if len(listDirUserPathLevels) > SystemUserDirLevel {
-			if !(regexp.MustCompile(`^[0-9]*$`).MatchString(listDirUserPathLevels[SystemUserDirLevel])) {
+		if len(listDirUserPathLevels) > systemUserDirLevel {
+			if !(regexp.MustCompile(`^[0-9]*$`).MatchString(listDirUserPathLevels[systemUserDirLevel])) {
 				return true
 			}
 		}
@@ -201,7 +211,7 @@ func nonNumericFilter(_path string, isUserFlag bool) bool {
 func userLevelFilter(_path string, isUserFlag bool) bool {
 	// if quadlet generator is run rootless, do not recurse other user sub dirs
 	// if quadlet generator is run as root, ignore users sub dirs
-	if strings.Contains(_path, filepath.Join(quadlet.UnitDirAdmin, "users")) {
+	if strings.HasPrefix(_path, resolvedUnitDirAdminUser) {
 		if isUserFlag {
 			return true
 		}
@@ -486,34 +496,47 @@ func warnIfAmbiguousName(unit *parser.UnitFile, group string) {
 	}
 }
 
-func generatePodsInfoMap(units []*parser.UnitFile) map[string]*quadlet.PodInfo {
-	podsInfoMap := make(map[string]*quadlet.PodInfo)
+func generateUnitsInfoMap(units []*parser.UnitFile) map[string]*quadlet.UnitInfo {
+	unitsInfoMap := make(map[string]*quadlet.UnitInfo)
 	for _, unit := range units {
-		if !strings.HasSuffix(unit.Filename, ".pod") {
+		var serviceName string
+		var containers []string
+		var resourceName string
+
+		switch {
+		case strings.HasSuffix(unit.Filename, ".container"):
+			serviceName = quadlet.GetContainerServiceName(unit)
+		case strings.HasSuffix(unit.Filename, ".volume"):
+			serviceName = quadlet.GetVolumeServiceName(unit)
+		case strings.HasSuffix(unit.Filename, ".kube"):
+			serviceName = quadlet.GetKubeServiceName(unit)
+		case strings.HasSuffix(unit.Filename, ".network"):
+			serviceName = quadlet.GetNetworkServiceName(unit)
+		case strings.HasSuffix(unit.Filename, ".image"):
+			serviceName = quadlet.GetImageServiceName(unit)
+		case strings.HasSuffix(unit.Filename, ".build"):
+			serviceName = quadlet.GetBuildServiceName(unit)
+			// Prefill resouceNames for .build files. This is significantly less complex than
+			// pre-computing all resourceNames for all Quadlet types (which is rather complex for a few
+			// types), but still breaks the dependency cycle between .volume and .build ([Volume] can
+			// have Image=some.build, and [Build] can have Volume=some.volume:/some-volume)
+			resourceName = quadlet.GetBuiltImageName(unit)
+		case strings.HasSuffix(unit.Filename, ".pod"):
+			serviceName = quadlet.GetPodServiceName(unit)
+			containers = make([]string, 0)
+		default:
+			Logf("Unsupported file type %q", unit.Filename)
 			continue
 		}
 
-		serviceName := quadlet.GetPodServiceName(unit)
-		podsInfoMap[unit.Filename] = &quadlet.PodInfo{
-			ServiceName: serviceName,
-			Containers:  make([]string, 0),
+		unitsInfoMap[unit.Filename] = &quadlet.UnitInfo{
+			ServiceName:  serviceName,
+			Containers:   containers,
+			ResourceName: resourceName,
 		}
 	}
 
-	return podsInfoMap
-}
-
-func prefillBuiltImageNames(units []*parser.UnitFile, resourceNames map[string]string) {
-	for _, unit := range units {
-		if !strings.HasSuffix(unit.Filename, ".build") {
-			continue
-		}
-
-		imageName := quadlet.GetBuiltImageName(unit)
-		if len(imageName) > 0 {
-			resourceNames[unit.Filename] = imageName
-		}
-	}
+	return unitsInfoMap
 }
 
 func main() {
@@ -612,40 +635,30 @@ func process() error {
 	})
 
 	// Generate the PodsInfoMap to allow containers to link to their pods and add themselves to the pod's containers list
-	podsInfoMap := generatePodsInfoMap(units)
-
-	// A map of network/volume unit file-names, against their calculated names, as needed by Podman.
-	var resourceNames = make(map[string]string)
-
-	// Prefill resouceNames for .build files. This is significantly less complex than
-	// pre-computing all resourceNames for all Quadlet types (which is rather complex for a few
-	// types), but still breaks the dependency cycle between .volume and .build ([Volume] can
-	// have Image=some.build, and [Build] can have Volume=some.volume:/some-volume)
-	prefillBuiltImageNames(units, resourceNames)
+	unitsInfoMap := generateUnitsInfoMap(units)
 
 	for _, unit := range units {
 		var service *parser.UnitFile
-		var name string
 		var err error
 
 		switch {
 		case strings.HasSuffix(unit.Filename, ".container"):
 			warnIfAmbiguousName(unit, quadlet.ContainerGroup)
-			service, err = quadlet.ConvertContainer(unit, resourceNames, isUserFlag, podsInfoMap)
+			service, err = quadlet.ConvertContainer(unit, isUserFlag, unitsInfoMap)
 		case strings.HasSuffix(unit.Filename, ".volume"):
 			warnIfAmbiguousName(unit, quadlet.VolumeGroup)
-			service, name, err = quadlet.ConvertVolume(unit, unit.Filename, resourceNames)
+			service, err = quadlet.ConvertVolume(unit, unit.Filename, unitsInfoMap)
 		case strings.HasSuffix(unit.Filename, ".kube"):
-			service, err = quadlet.ConvertKube(unit, resourceNames, isUserFlag)
+			service, err = quadlet.ConvertKube(unit, unitsInfoMap, isUserFlag)
 		case strings.HasSuffix(unit.Filename, ".network"):
-			service, name, err = quadlet.ConvertNetwork(unit, unit.Filename)
+			service, err = quadlet.ConvertNetwork(unit, unit.Filename, unitsInfoMap)
 		case strings.HasSuffix(unit.Filename, ".image"):
 			warnIfAmbiguousName(unit, quadlet.ImageGroup)
-			service, name, err = quadlet.ConvertImage(unit)
+			service, err = quadlet.ConvertImage(unit, unitsInfoMap)
 		case strings.HasSuffix(unit.Filename, ".build"):
-			service, name, err = quadlet.ConvertBuild(unit, resourceNames)
+			service, err = quadlet.ConvertBuild(unit, unitsInfoMap)
 		case strings.HasSuffix(unit.Filename, ".pod"):
-			service, err = quadlet.ConvertPod(unit, unit.Filename, podsInfoMap, resourceNames)
+			service, err = quadlet.ConvertPod(unit, unit.Filename, unitsInfoMap)
 		default:
 			Logf("Unsupported file type %q", unit.Filename)
 			continue
@@ -656,9 +669,6 @@ func process() error {
 			continue
 		}
 
-		if name != "" {
-			resourceNames[unit.Filename] = name
-		}
 		service.Path = path.Join(outputPath, service.Filename)
 
 		if dryRunFlag {
