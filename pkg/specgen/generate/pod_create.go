@@ -85,6 +85,12 @@ func MakePod(p *entities.PodSpec, rt *libpod.Runtime) (_ *libpod.Pod, finalErr e
 		// make sure of that here.
 		p.PodSpecGen.InfraContainerSpec.ResourceLimits = nil
 		p.PodSpecGen.InfraContainerSpec.WeightDevice = nil
+
+		// Set default for HealthCheck
+		p.PodSpecGen.InfraContainerSpec.HealthLogDestination = define.DefaultHealthCheckLocalDestination
+		p.PodSpecGen.InfraContainerSpec.HealthMaxLogCount = define.DefaultHealthMaxLogCount
+		p.PodSpecGen.InfraContainerSpec.HealthMaxLogSize = define.DefaultHealthMaxLogSize
+
 		rtSpec, spec, opts, err := MakeContainer(context.Background(), rt, p.PodSpecGen.InfraContainerSpec, false, nil)
 		if err != nil {
 			return nil, err
@@ -268,7 +274,7 @@ func MapSpec(p *specgen.PodSpecGenerator) (*specgen.SpecGenerator, error) {
 		spec.ConmonPidFile = p.InfraConmonPidFile
 	}
 
-	if p.Sysctl != nil && len(p.Sysctl) > 0 {
+	if len(p.Sysctl) > 0 {
 		spec.Sysctl = p.Sysctl
 	}
 

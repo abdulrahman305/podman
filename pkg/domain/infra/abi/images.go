@@ -1,3 +1,5 @@
+//go:build !remote
+
 package abi
 
 import (
@@ -17,6 +19,7 @@ import (
 	"time"
 
 	bdefine "github.com/containers/buildah/define"
+	"github.com/containers/buildah/pkg/volumes"
 	"github.com/containers/common/libimage"
 	"github.com/containers/common/libimage/filter"
 	"github.com/containers/common/pkg/config"
@@ -105,6 +108,13 @@ func (ir *ImageEngine) Prune(ctx context.Context, opts entities.ImagePruneOption
 		numPreviouslyRemovedImages = numRemovedImages
 	}
 
+	if opts.BuildCache || opts.All {
+		// Clean build cache if any
+		if err := volumes.CleanCacheMount(); err != nil {
+			return nil, err
+		}
+	}
+
 	return pruneReports, nil
 }
 
@@ -144,8 +154,28 @@ func (ir *ImageEngine) History(ctx context.Context, nameOrID string, opts entiti
 }
 
 func (ir *ImageEngine) Mount(ctx context.Context, nameOrIDs []string, opts entities.ImageMountOptions) ([]*entities.ImageMountReport, error) {
-	if opts.All && len(nameOrIDs) > 0 {
+	listMountsOnly := false
+	var images []*libimage.Image
+	var err error
+	switch {
+	case opts.All && len(nameOrIDs) > 0:
 		return nil, errors.New("cannot mix --all with images")
+	case len(nameOrIDs) > 0:
+		images, err = ir.Libpod.LibimageRuntime().ListImagesByNames(nameOrIDs)
+		if err != nil {
+			return nil, err
+		}
+	default:
+		listImagesOptions := &libimage.ListImagesOptions{}
+		if opts.All {
+			listImagesOptions.Filters = []string{"readonly=false"}
+		} else {
+			listMountsOnly = true
+		}
+		images, err = ir.Libpod.LibimageRuntime().ListImages(ctx, listImagesOptions)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	if os.Geteuid() != 0 {
@@ -164,17 +194,7 @@ func (ir *ImageEngine) Mount(ctx context.Context, nameOrIDs []string, opts entit
 		}
 	}
 
-	listImagesOptions := &libimage.ListImagesOptions{}
-	if opts.All {
-		listImagesOptions.Filters = []string{"readonly=false"}
-	}
-	images, err := ir.Libpod.LibimageRuntime().ListImages(ctx, nameOrIDs, listImagesOptions)
-	if err != nil {
-		return nil, err
-	}
-
 	mountReports := []*entities.ImageMountReport{}
-	listMountsOnly := !opts.All && len(nameOrIDs) == 0
 	for _, i := range images {
 		var mountPoint string
 		var err error
@@ -213,17 +233,25 @@ func (ir *ImageEngine) Mount(ctx context.Context, nameOrIDs []string, opts entit
 }
 
 func (ir *ImageEngine) Unmount(ctx context.Context, nameOrIDs []string, options entities.ImageUnmountOptions) ([]*entities.ImageUnmountReport, error) {
-	if options.All && len(nameOrIDs) > 0 {
+	var images []*libimage.Image
+	var err error
+	switch {
+	case options.All && len(nameOrIDs) > 0:
 		return nil, errors.New("cannot mix --all with images")
-	}
-
-	listImagesOptions := &libimage.ListImagesOptions{}
-	if options.All {
-		listImagesOptions.Filters = []string{"readonly=false"}
-	}
-	images, err := ir.Libpod.LibimageRuntime().ListImages(ctx, nameOrIDs, listImagesOptions)
-	if err != nil {
-		return nil, err
+	case len(nameOrIDs) > 0:
+		images, err = ir.Libpod.LibimageRuntime().ListImagesByNames(nameOrIDs)
+		if err != nil {
+			return nil, err
+		}
+	default:
+		listImagesOptions := &libimage.ListImagesOptions{}
+		if options.All {
+			listImagesOptions.Filters = []string{"readonly=false"}
+		}
+		images, err = ir.Libpod.LibimageRuntime().ListImages(ctx, listImagesOptions)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	unmountReports := []*entities.ImageUnmountReport{}

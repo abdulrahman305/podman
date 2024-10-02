@@ -1,3 +1,5 @@
+//go:build linux || freebsd
+
 package integration
 
 import (
@@ -740,9 +742,9 @@ USER bin`, BB)
 	It("podman run limits host test", func() {
 		SkipIfRemote("This can only be used for local tests")
 		info := GetHostDistributionInfo()
-		if info.Distribution == "debian" {
+		if info.Distribution == "debian" && isRootless() {
 			// "expected 1048576 to be >= 1073741816"
-			Skip("FIXME 2024-05-28 fails on debian, maybe because of systemd 256?")
+			Skip("FIXME 2024-09 still fails on debian rootless, reason unknown")
 		}
 
 		var l syscall.Rlimit
@@ -955,7 +957,29 @@ USER bin`, BB)
 		random := stringid.GenerateRandomID()
 
 		hookScript := fmt.Sprintf(`#!/bin/sh
-echo -n %s >%s
+teststring="%s"
+tmpfile="%s"
+
+# Hook gets invoked with config.json in stdin.
+# Flush it, otherwise caller may get SIGPIPE.
+cat >$tmpfile.json
+
+# Check for required fields in our given json.
+# Hooks have no visibility -- our output goes nowhere -- so
+# use unique exit codes to give test code reader a hint as
+# to what went wrong. Podman will exit 126, but will emit
+#   "crun: error executing hook .... (exit code: X)"
+rc=1
+for s in ociVersion id pid root bundle status annotations io.container.manager; do
+    grep -w $s $tmpfile.json || exit $rc
+    rc=$((rc + 1))
+done
+rm -f $tmpfile.json
+
+# json contains all required keys. We're good so far.
+# Now write a modified teststring to our tmpfile. Our
+# caller will confirm.
+echo -n madeit-$teststring >$tmpfile
 `, random, targetFile)
 		err = os.WriteFile(hookScriptPath, []byte(hookScript), 0755)
 		Expect(err).ToNot(HaveOccurred())
@@ -966,7 +990,7 @@ echo -n %s >%s
 
 		b, err := os.ReadFile(targetFile)
 		Expect(err).ToNot(HaveOccurred())
-		Expect(string(b)).To(Equal(random))
+		Expect(string(b)).To(Equal("madeit-" + random))
 	})
 
 	It("podman run with subscription secrets", func() {
@@ -2160,8 +2184,7 @@ WORKDIR /madethis`, BB)
 
 		lock := GetPortLock("5006")
 		defer lock.Unlock()
-		// FIXME: #23517: using network slirp4netns as work around
-		session := podmanTest.Podman([]string{"run", "-d", "--network", "slirp4netns", "--name", "registry", "-p", "5006:5000", REGISTRY_IMAGE, "/entrypoint.sh", "/etc/docker/registry/config.yml"})
+		session := podmanTest.Podman([]string{"run", "-d", "--name", "registry", "-p", "5006:5000", REGISTRY_IMAGE, "/entrypoint.sh", "/etc/docker/registry/config.yml"})
 		session.WaitWithDefaultTimeout()
 		Expect(session).Should(ExitCleanly())
 
@@ -2198,12 +2221,6 @@ WORKDIR /madethis`, BB)
 	})
 
 	It("podman run --shm-size-systemd", func() {
-		// FIXME Failed to set RLIMIT_CORE: Operation not permitted
-		info := GetHostDistributionInfo()
-		if info.Distribution == "debian" {
-			Skip("FIXME 2024-05-28 fails on debian, maybe because of systemd 256?")
-		}
-
 		ctrName := "testShmSizeSystemd"
 		run := podmanTest.Podman([]string{"run", "--name", ctrName, "--shm-size-systemd", "10mb", "-d", SYSTEMD_IMAGE, "/sbin/init"})
 		run.WaitWithDefaultTimeout()

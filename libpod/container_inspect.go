@@ -195,7 +195,7 @@ func (c *Container) getContainerInspectData(size bool, driverData *define.Driver
 	// inspect status should be set to nil.
 	if c.config.HealthCheckConfig != nil && !(len(c.config.HealthCheckConfig.Test) == 1 && c.config.HealthCheckConfig.Test[0] == "NONE") {
 		// This container has a healthcheck defined in it; we need to add its state
-		healthCheckState, err := c.getHealthCheckLog()
+		healthCheckState, err := c.readHealthCheckLog()
 		if err != nil {
 			// An error here is not considered fatal; no health state will be displayed
 			logrus.Error(err)
@@ -211,6 +211,7 @@ func (c *Container) getContainerInspectData(size bool, driverData *define.Driver
 		return nil, err
 	}
 	data.NetworkSettings = networkConfig
+	addInspectPortsExpose(c.config.ExposedPorts, data.NetworkSettings.Ports)
 
 	inspectConfig := c.generateInspectContainerConfig(ctrSpec)
 	data.Config = inspectConfig
@@ -372,6 +373,20 @@ func (c *Container) generateInspectContainerConfig(spec *spec.Spec) *define.Insp
 	if spec.Process != nil {
 		ctrConfig.Tty = spec.Process.Terminal
 		ctrConfig.Env = append([]string{}, spec.Process.Env...)
+
+		// finds all secrets mounted as env variables and hides the value
+		// the inspect command should not display it
+		envSecrets := c.config.EnvSecrets
+		for envIndex, envValue := range ctrConfig.Env {
+			// env variables come in the style `name=value`
+			envName := strings.Split(envValue, "=")[0]
+
+			envSecret, ok := envSecrets[envName]
+			if ok {
+				ctrConfig.Env[envIndex] = envSecret.Name + "=*******"
+			}
+		}
+
 		ctrConfig.WorkingDir = spec.Process.Cwd
 	}
 
@@ -411,6 +426,12 @@ func (c *Container) generateInspectContainerConfig(spec *spec.Spec) *define.Insp
 	ctrConfig.Healthcheck = c.config.HealthCheckConfig
 
 	ctrConfig.HealthcheckOnFailureAction = c.config.HealthCheckOnFailureAction.String()
+
+	ctrConfig.HealthLogDestination = c.config.HealthLogDestination
+
+	ctrConfig.HealthMaxLogCount = c.config.HealthMaxLogCount
+
+	ctrConfig.HealthMaxLogSize = c.config.HealthMaxLogSize
 
 	ctrConfig.CreateCommand = c.config.CreateCommand
 
@@ -516,6 +537,9 @@ func (c *Container) generateInspectContainerHostConfig(ctrSpec *spec.Spec, named
 		hostConfig.ContainerIDFile = ctrSpec.Annotations[define.InspectAnnotationCIDFile]
 		if ctrSpec.Annotations[define.InspectAnnotationAutoremove] == define.InspectResponseTrue {
 			hostConfig.AutoRemove = true
+		}
+		if ctrSpec.Annotations[define.InspectAnnotationAutoremoveImage] == define.InspectResponseTrue {
+			hostConfig.AutoRemoveImage = true
 		}
 		if ctrs, ok := ctrSpec.Annotations[define.VolumesFromAnnotation]; ok {
 			hostConfig.VolumesFrom = strings.Split(ctrs, ";")

@@ -1,3 +1,5 @@
+//go:build linux || freebsd
+
 package integration
 
 import (
@@ -415,7 +417,6 @@ var _ = Describe("Podman pod create", func() {
 
 	tests := []string{"", "none"}
 	for _, test := range tests {
-		test := test
 		It("podman pod create --share="+test+" should not create an infra ctr", func() {
 			session := podmanTest.Podman([]string{"pod", "create", "--share", test})
 			session.WaitWithDefaultTimeout()

@@ -23,7 +23,7 @@ env:
     # GCE project where images live
     IMAGE_PROJECT: "libpod-218412"
     # VM Image built in containers/automation_images
-    IMAGE_SUFFIX: "c20240529t141726z-f40f39d13"
+    IMAGE_SUFFIX: "c20240821t171500z-f40f39d13"
     FEDORA_CACHE_IMAGE_NAME: "fedora-${IMAGE_SUFFIX}"
     DEBIAN_CACHE_IMAGE_NAME: "debian-${IMAGE_SUFFIX}"
 
@@ -171,7 +171,7 @@ vendor_task:
 cross_task:
     alias: cross
     container:
-        image: golang:1.21
+        image: golang:1.22
     build_script: make cross
 
 

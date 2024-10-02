@@ -10,6 +10,9 @@
 load helpers
 load helpers.network
 
+# All tests in this file must be able to run in parallel
+# bats file_tags=ci:parallel
+
 function setup() {
     basic_setup
     skip_if_not_rootless "pasta networking only available in rootless mode"
@@ -156,7 +159,7 @@ function pasta_test_do() {
         local seq="$(echo ${port} | tr '-' ' ')"
         local xseq="$(echo ${xport} | tr '-' ' ')"
     else
-        local port=$(random_free_port "" ${address} ${proto})
+        local port=$(random_free_port "" ${addr} ${proto})
         local xport="$((port + delta))"
         local seq="${port} ${port}"
         local xseq="${xport} ${xport}"
@@ -166,10 +169,6 @@ function pasta_test_do() {
 
     # socat options for first <address> in server ("LISTEN" address types),
     local bind="${proto_upper}${ip_ver}-LISTEN:\${port}"
-    # For IPv6 via tap, we can pick either link-local or global unicast
-    if [ ${ip_ver} -eq 4 ] || [ ${iftype} = "loopback" ]; then
-        bind="${bind},bind=[${addr}]"
-    fi
     if [ "${proto}" = "udp" ]; then
         bind="${bind},null-eof"
     fi
@@ -252,6 +251,10 @@ function pasta_test_do() {
     # Get server output, --follow is used to wait for the container to exit,
     run_podman logs --follow $cname
     # which should give us the expected output back.
+    # ...except, sigh, #23482: seems to be a bug in socat, issues spurious warning
+    if [[ "$recv" =~ EXEC ]]; then
+        output=$(grep -vE 'socat.*waitpid.*No child process' <<<"$output")
+    fi
     assert "${output}" = "${expect}" "Mismatch between data sent and received"
 
     run_podman rm $cname
@@ -332,7 +335,7 @@ function pasta_test_do() {
 @test "podman puts pasta IP in /etc/hosts" {
     skip_if_no_ipv4 "IPv4 not routable on the host"
 
-    pname="p$(random_string 30)"
+    pname="p-$(safename)"
     ip="$(default_addr 4)"
 
     run_podman pod create --net=pasta --name "${pname}"
@@ -341,7 +344,6 @@ function pasta_test_do() {
     assert "$(echo ${output} | cut -f1 -d' ')" = "${ip}" "Correct /etc/hosts entry missing"
 
     run_podman pod rm "${pname}"
-    run_podman rmi $(pause_image)
 }
 
 ### Routes #####################################################################
@@ -428,43 +430,52 @@ function pasta_test_do() {
 
 ### DNS ########################################################################
 
-@test "External resolver, IPv4" {
-    skip_if_no_ipv4 "IPv4 not routable on the host"
-
-    run_podman '?' run --rm --net=pasta $IMAGE nslookup 127.0.0.1
-
-    assert "$output" =~ "1.0.0.127.in-addr.arpa" \
-           "127.0.0.1 not resolved"
+@test "Basic nameserver lookup" {
+    run_podman run --rm --net=pasta $IMAGE nslookup l.root-servers.net
 }
 
-@test "External resolver, IPv6" {
-    skip_if_no_ipv6 "IPv6 not routable on the host"
-
-    run_podman '?' run --rm --net=pasta $IMAGE nslookup ::1
-
-    assert "$output" =~ "1.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.ip6.arpa" \
-           "::1 not resolved"
-}
-
-@test "Local forwarder, IPv4" {
+@test "Default nameserver forwarding" {
     skip_if_no_ipv4 "IPv4 not routable on the host"
 
     # pasta is the default now so no need to set it
     run_podman run --rm $IMAGE grep nameserver /etc/resolv.conf
-    assert "${lines[0]}" == "nameserver 169.254.0.1" "default dns forward server"
-
-    run_podman run --rm --net=pasta:--dns-forward,198.51.100.1 \
-        $IMAGE nslookup 127.0.0.1 || :
-    assert "$output" =~ "1.0.0.127.in-addr.arpa" "No answer from resolver"
+    assert "${lines[0]}" == "nameserver 169.254.1.1" "default dns forward server"
 }
 
-@test "Local forwarder, IPv6" {
+@test "Custom DNS forward address, IPv4" {
+    skip_if_no_ipv4 "IPv4 not routable on the host"
+
+    local addr=198.51.100.1
+
+    run_podman run --rm --net=pasta:--dns-forward,$addr \
+        $IMAGE grep nameserver /etc/resolv.conf
+    assert "${lines[0]}" == "nameserver $addr" "custom dns forward server"
+
+    run_podman run --rm --net=pasta:--dns-forward,$addr \
+        $IMAGE nslookup l.root-servers.net $addr
+}
+
+@test "Custom DNS forward address, IPv6" {
     skip_if_no_ipv6 "IPv6 not routable on the host"
 
-    # TODO: Two issues here:
+    # TODO: In fact, this requires not just IPv6 connectivity on the
+    #       host, but an IPv6 reachable nameserver which is harder to
+    #       test for.  We could remove that requirement if pasta could
+    #       forward between IPv4 and IPv6 addresses but as of
+    #       2024_09_06.6b38f07 that's unsupported.  Skip the test for
+    #       now.
     skip "Currently unsupported"
-    # run_podman run --dns 2001:db8::1 \
-    #   --net=pasta:--dns-forward,2001:db8::1 $IMAGE nslookup ::1
+    # local addr=2001:db8::1
+    #
+    # run_podman run --rm --net=pasta:--dns-forward,$addr \
+    #     $IMAGE grep nameserver /etc/resolv.conf
+    # assert "${lines[0]}" == "nameserver $addr" "custom dns forward server"
+    # run_podman run --rm --net=pasta:--dns-forward,$addr \
+    #     $IMAGE nslookup l.root-servers.net $addr
+    #
+    # TODO: In addition to the IPv6 nameserver requirement above,
+    #       there seem to be two problems running this test.  It's
+    #       unclear if those are in busybox, musl or pasta.
     #
     # 1. With this, Podman writes "nameserver 2001:db8::1" to
     #    /etc/resolv.conf, without zone, and the query originates from ::1.
@@ -762,8 +773,21 @@ function pasta_test_do() {
     local pidfile="${PODMAN_TMPDIR}/pasta.pid"
 
     run_podman run --rm "--net=pasta:--pid,${pidfile}" $IMAGE true
-    sleep 1
-    ! ps -p $(cat "${pidfile}") && rm "${pidfile}"
+
+    # Allow time for process to vanish, in case there's high load
+    local pid=$(< $pidfile)
+    local timeout=5
+    while [[ $timeout -gt 0 ]]; do
+        if ! ps -p $pid; then
+            return
+        fi
+
+        # Still alive. Wait and retry
+        sleep 1
+        timeout=$((timeout - 1))
+    done
+
+    die "Timed out waiting for pid $pid to terminate"
 }
 
 ### Options ####################################################################
@@ -797,24 +821,6 @@ EOF
     assert "$output" =~ "$mac2" "mac address from cli is set on custom interface"
 }
 
-### Rootless unshare testing
-
-@test "Podman unshare --rootless-netns with Pasta" {
-    skip_if_remote "unshare is local-only"
-
-    pasta_iface=$(default_ifname 4)
-    assert "$pasta_iface" != "" "pasta_iface is set"
-
-    # First let's force a setup error by making pasta be "false".
-    ln -s /usr/bin/false $PODMAN_TMPDIR/pasta
-    CONTAINERS_HELPER_BINARY_DIR="$PODMAN_TMPDIR" run_podman 125 unshare --rootless-netns ip addr
-    assert "$output" =~ "pasta failed with exit code 1"
-
-    # Now this should recover from the previous error and setup the netns correctly.
-    run_podman unshare --rootless-netns ip addr
-    is "$output" ".*${pasta_iface}.*"
-}
-
 # https://github.com/containers/podman/issues/22653
 @test "pasta/bridge and host.containers.internal" {
     skip_if_no_ipv4 "IPv4 not routable on the host"
@@ -831,7 +837,9 @@ EOF
         run_podman '?' run --rm --network=$network $IMAGE grep host.containers.internal /etc/hosts
         if [ "$status" -eq 0 ]; then
             assert "$output" !~ "$pasta_ip" "pasta host ip must not be assigned ($network)"
-            assert "$host_ips" =~ "$(cut -f1 <<<$output)" "ip is one of the host ips ($network)"
+            # even more special we use a new --map-guest-addr pasta option and
+            # to map 169.254.1.2 to the host, https://github.com/containers/common/pull/2136
+            assert "$host_ips 169.254.1.2" =~ "$(cut -f1 <<<$output)" "ip is one of the host ips ($network)"
         elif [ "$status" -eq 1 ]; then
             # if only pasta ip then we cannot have a host.containers.internal entry
             # make sure this fact is actually the case
@@ -844,6 +852,6 @@ EOF
     run_podman network rm $netname
 
     first_host_ip=$(head -n 1 <<<"$host_ips")
-    run_podman run --rm --network=pasta:-a,169.254.0.2,-g,169.254.0.1,-n,24 $IMAGE grep host.containers.internal /etc/hosts
-    assert "$output" =~ "^$first_host_ip" "uses host first ip"
+    run_podman run --rm --network=pasta:-a,192.168.0.2,-g,192.168.0.1,-n,24 $IMAGE grep host.containers.internal /etc/hosts
+    assert "$output" =~ "^($first_host_ip|169.254.1.2)" "uses first host ip or special 169.254.1.2 --map-guest-addr"
 }

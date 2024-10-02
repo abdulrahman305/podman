@@ -1,3 +1,5 @@
+//go:build linux || freebsd
+
 package integration
 
 import (
@@ -8,12 +10,6 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 )
-
-// FIXME 2024-05-14: "Debian" here is a proxy for "netavark < 1.10"
-func isDebian() bool {
-	info := GetHostDistributionInfo()
-	return info.Distribution == "debian"
-}
 
 func createNetworkDevice(name string) {
 	session := SystemExec("ip", []string{"link", "add", name, "type", "bridge"})
@@ -101,11 +97,6 @@ var _ = Describe("Podman container interface name", func() {
 			}
 
 			for _, driverType := range []string{"macvlan", "ipvlan"} {
-				if driverType == "ipvlan" && isDebian() {
-					GinkgoWriter.Println("FIXME: Fails with netavark < 1.10. Re-enable once Debian gets an update")
-					continue
-				}
-
 				netName1 := createNetworkName(driverType)
 				netName2 := createNetworkName(driverType)
 
@@ -154,11 +145,6 @@ var _ = Describe("Podman container interface name", func() {
 		SkipIfRootless("cannot create network device in rootless mode.")
 
 		for _, driverType := range []string{"macvlan", "ipvlan"} {
-			if driverType == "ipvlan" && isDebian() {
-				GinkgoWriter.Println("FIXME: Fails with netavark < 1.10. Re-enable once Debian gets an update")
-				continue
-			}
-
 			// Create a nic to be used as a parent for macvlan/ipvlan network.
 			nicName1 := createNetworkName("nic")[:8]
 			nicName2 := createNetworkName("nic")[:8]
@@ -220,11 +206,6 @@ var _ = Describe("Podman container interface name", func() {
 		createContainersConfFileWithDeviceIfaceName(podmanTest)
 
 		for _, driverType := range []string{"macvlan", "ipvlan"} {
-			if driverType == "ipvlan" && isDebian() {
-				GinkgoWriter.Println("FIXME: Fails with netavark < 1.10. Re-enable once Debian gets an update")
-				continue
-			}
-
 			// Create a nic to be used as a parent for the network.
 			nicName1 := createNetworkName("nic")[:8]
 			nicName2 := createNetworkName("nic")[:8]

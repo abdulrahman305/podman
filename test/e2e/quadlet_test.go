@@ -1,3 +1,5 @@
+//go:build linux || freebsd
+
 package integration
 
 import (
@@ -839,6 +841,7 @@ BOGUS=foo
 		Entry("exec.container", "exec.container"),
 		Entry("group-add.container", "group-add.container"),
 		Entry("health.container", "health.container"),
+		Entry("host.container", "host.container"),
 		Entry("hostname.container", "hostname.container"),
 		Entry("idmapping.container", "idmapping.container"),
 		Entry("image.container", "image.container"),
@@ -895,6 +898,7 @@ BOGUS=foo
 		Entry("template@instance.container", "template@instance.container"),
 		Entry("Unit After Override", "unit-after-override.container"),
 		Entry("NetworkAlias", "network-alias.container"),
+		Entry("CgroupMode", "cgroups-mode.container"),
 
 		Entry("basic.volume", "basic.volume"),
 		Entry("device-copy.volume", "device-copy.volume"),
@@ -980,6 +984,7 @@ BOGUS=foo
 		Entry("Build - GroupAdd Key", "group-add.build"),
 		Entry("Build - Containers Conf Modules", "containersconfmodule.build"),
 		Entry("Build - Label Key", "label.build"),
+		Entry("Build - Multiple Tags", "multiple-tags.build"),
 		Entry("Build - Network Key host", "network.build"),
 		Entry("Build - PodmanArgs", "podmanargs.build"),
 		Entry("Build - Pull Key", "pull.build"),
@@ -996,11 +1001,20 @@ BOGUS=foo
 		Entry("Build - TLSVerify Key", "tls-verify.build"),
 		Entry("Build - Variant Key", "variant.build"),
 
-		Entry("basic.pod", "basic.pod"),
-		Entry("name.pod", "name.pod"),
-		Entry("network.pod", "network.pod"),
-		Entry("podmanargs.pod", "podmanargs.pod"),
+		Entry("Pod - Basic", "basic.pod"),
+		Entry("Pod - DNS", "dns.pod"),
+		Entry("Pod - DNS Option", "dns-option.pod"),
+		Entry("Pod - DNS Search", "dns-search.pod"),
+		Entry("Pod - Host", "host.pod"),
+		Entry("Pod - IP", "ip.pod"),
+		Entry("Pod - Name", "name.pod"),
+		Entry("Pod - Network", "network.pod"),
+		Entry("Pod - PodmanArgs", "podmanargs.pod"),
 		Entry("Pod - NetworkAlias", "network-alias.pod"),
+		Entry("Pod - Remap auto", "remap-auto.pod"),
+		Entry("Pod - Remap auto2", "remap-auto2.pod"),
+		Entry("Pod - Remap keep-id", "remap-keep-id.pod"),
+		Entry("Pod - Remap manual", "remap-manual.pod"),
 	)
 
 	DescribeTable("Running expected warning quadlet test case",
@@ -1065,6 +1079,9 @@ BOGUS=foo
 		Entry("Container - Mount overriding service name", "mount.servicename.container", []string{"service-name.volume"}),
 		Entry("Container - Quadlet Network overriding service name", "network.quadlet.servicename.container", []string{"service-name.network"}),
 		Entry("Container - Quadlet Volume overriding service name", "volume.servicename.container", []string{"service-name.volume"}),
+		Entry("Container - Quadlet build with multiple tags", "build.multiple-tags.container", []string{"multiple-tags.build"}),
+		Entry("Container - Reuse another container's network", "network.reuse.container", []string{"basic.container"}),
+		Entry("Container - Reuse another named container's network", "network.reuse.name.container", []string{"name.container"}),
 
 		Entry("Volume - Quadlet image (.build)", "build.quadlet.volume", []string{"basic.build"}),
 		Entry("Volume - Quadlet image (.image)", "image.quadlet.volume", []string{"basic.image"}),

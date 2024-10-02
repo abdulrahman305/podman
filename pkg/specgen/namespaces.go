@@ -9,11 +9,12 @@ import (
 
 	"github.com/containers/common/libnetwork/types"
 	"github.com/containers/common/pkg/cgroups"
+	"github.com/containers/common/pkg/config"
 	"github.com/containers/podman/v5/libpod/define"
 	"github.com/containers/podman/v5/pkg/namespaces"
-	"github.com/containers/podman/v5/pkg/rootless"
 	"github.com/containers/podman/v5/pkg/util"
 	"github.com/containers/storage/pkg/fileutils"
+	"github.com/containers/storage/pkg/unshare"
 	storageTypes "github.com/containers/storage/types"
 	spec "github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/opencontainers/runtime-tools/generate"
@@ -160,10 +161,15 @@ func validateNetNS(n *Namespace) error {
 	case Slirp:
 		break
 	case Pasta:
-		if rootless.IsRootless() {
+		// Check if we run rootless/in a userns. Do not use rootless.IsRootless() here.
+		// Pasta switches to nobody when running as root which causes it to fail while
+		// opening the netns owned by root. However when pasta is already in a userns
+		// it doesn't switch to nobody so it works there.
+		// https://github.com/containers/podman/issues/17840
+		if unshare.IsRootless() {
 			break
 		}
-		return fmt.Errorf("pasta networking is only supported for rootless mode")
+		return fmt.Errorf("pasta networking is only supported for rootless mode or when inside a nested userns")
 	case "", Default, Host, Path, FromContainer, FromPod, Private, NoNetwork, Bridge:
 		break
 	default:
@@ -328,14 +334,18 @@ func ParseUserNamespace(ns string) (Namespace, error) {
 // If the input is nil or empty it will use the default setting from containers.conf
 func ParseNetworkFlag(networks []string) (Namespace, map[string]types.PerNetworkOptions, map[string][]string, error) {
 	var networkOptions map[string][]string
+	toReturn := Namespace{}
 	// by default we try to use the containers.conf setting
 	// if we get at least one value use this instead
-	ns := containerConfig.Containers.NetNS
+	cfg, err := config.Default()
+	if err != nil {
+		return toReturn, nil, nil, err
+	}
+	ns := cfg.Containers.NetNS
 	if len(networks) > 0 {
 		ns = networks[0]
 	}
 
-	toReturn := Namespace{}
 	podmanNetworks := make(map[string]types.PerNetworkOptions)
 
 	switch {

@@ -35,8 +35,7 @@ Quadlet files for non-root users can be placed in the following directories
 
 ### Using symbolic links
 
-Quadlet supports using symbolic links for the base of the search paths.
-Symbolic links below the search paths are not supported.
+Quadlet supports using symbolic links for the base of the search paths and inside them.
 
 ## DESCRIPTION
 
@@ -257,8 +256,10 @@ Valid options for `[Container]` are listed below:
 |--------------------------------------|------------------------------------------------------|
 | AddCapability=CAP                    | --cap-add CAP                                        |
 | AddDevice=/dev/foo                   | --device /dev/foo                                    |
+| AddHost=hostname:192.168.10.11       | --add-host=hostname:192.168.10.11                    |
 | Annotation="XYZ"                     | --annotation "XYZ"                                   |
 | AutoUpdate=registry                  | --label "io.containers.autoupdate=registry"          |
+| CgroupsMode=no-conmon                | --cgroups=no-conmon                                  |
 | ContainerName=name                   | --name name                                          |
 | ContainersConfModule=/etc/nvd\.conf  | --module=/etc/nvd\.conf                              |
 | DNS=192.168.55.1                     | --dns=192.168.55.1                                   |
@@ -277,6 +278,9 @@ Valid options for `[Container]` are listed below:
 | GroupAdd=keep-groups                 | --group-add=keep-groups                              |
 | HealthCmd=/usr/bin/command           | --health-cmd=/usr/bin/command                        |
 | HealthInterval=2m                    | --health-interval=2m                                 |
+| HealthLogDestination=/foo/log        | --health-log-destination=/foo/log                    |
+| HealthMaxLogCount=5                  | --health-max-log-count=5                             |
+| HealthMaxLogSize=500                 | --health-max-log-size=500                            |
 | HealthOnFailure=kill                 | --health-on-failure=kill                             |
 | HealthRetries=5                      | --health-retries=5                                   |
 | HealthStartPeriod=1m                 | --health-start-period=period=1m                      |
@@ -355,6 +359,14 @@ only if it exists on the host.
 
 This key can be listed multiple times.
 
+### `AddHost=`
+
+Add  host-to-IP mapping to /etc/hosts.
+The format is `hostname:ip`.
+
+Equivalent to the Podman `--add-host` option.
+This key can be listed multiple times.
+
 ### `Annotation=`
 
 Set one or more OCI annotations on the container. The format is a list of `key=value` items,
@@ -369,6 +381,16 @@ Indicates whether the container will be auto-updated ([podman-auto-update(1)](po
 * `registry`: Requires a fully-qualified image reference (e.g., quay.io/podman/stable:latest) to be used to create the container. This enforcement is necessary to know which image to actually check and pull. If an image ID was used, Podman does not know which image to check/pull anymore.
 
 * `local`: Tells Podman to compare the image a container is using to the image with its raw name in local storage. If an image is updated locally, Podman simply restarts the systemd unit executing the container.
+
+### `CgroupsMode=`
+
+The cgroups mode of the Podman container. Equivalent to the Podman `--cgroups` option.
+
+By default, the cgroups mode of the container created by Quadlet is `split`,
+which differs from the default (`enabled`) used by the Podman CLI.
+
+If the container joins a pod (i.e. `Pod=` is specified), you may want to change this to
+`no-conmon` or `enabled` so that pod level cgroup resource limits can take effect.
 
 ### `ContainerName=`
 
@@ -495,6 +517,28 @@ Equivalent to the Podman `--health-cmd` option.
 Set an interval for the healthchecks. An interval of disable results in no automatic timer setup.
 Equivalent to the Podman `--health-interval` option.
 
+### `HealthLogDestination=`
+
+Set the destination of the HealthCheck log. Directory path, local or events_logger (local use container state file)
+(Default: local)
+Equivalent to the Podman `--health-log-destination` option.
+
+* `local`: (default) HealthCheck logs are stored in overlay containers. (For example: `$runroot/healthcheck.log`)
+* `directory`: creates a log file named `<container-ID>-healthcheck.log` with HealthCheck logs in the specified directory.
+* `events_logger`: The log will be written with logging mechanism set by events_logger. It also saves the log to a default directory, for performance on a system with a large number of logs.
+
+### `HealthMaxLogCount=`
+
+Set maximum number of attempts in the HealthCheck log file. ('0' value means an infinite number of attempts in the log file)
+(Default: 5 attempts)
+Equivalent to the Podman `--Health-max-log-count` option.
+
+### `HealthMaxLogSize=`
+
+Set maximum length in characters of stored HealthCheck log. ("0" value means an infinite log length)
+(Default: 500 characters)
+Equivalent to the Podman `--Health-max-log-size` option.
+
 ### `HealthOnFailure=`
 
 Action to take once the container transitions to an unhealthy state.
@@ -617,6 +661,10 @@ As a special case, if the `name` of the network ends with `.network`, a Podman n
 `systemd-$name` is used, and the generated systemd service contains
 a dependency on the `$name-network.service`. Such a network can be automatically
 created by using a `$name.network` Quadlet file.
+
+Another special case is that if the `name` ends with `.container`,
+the container will reuse the network stack of another container created by `$name.container`.
+The generated systemd service contains a dependency on `$name.service`.
 
 This key can be listed multiple times.
 
@@ -866,21 +914,65 @@ Valid options for `[Pod]` are listed below:
 
 | **[Pod] options**                   | **podman container create equivalent** |
 |-------------------------------------|----------------------------------------|
+| AddHost=hostname:192.168.10.11      | --add-host=hostname:192.168.10.11      |
 | ContainersConfModule=/etc/nvd\.conf | --module=/etc/nvd\.conf                |
+| DNS=192.168.55.1                    | --dns=192.168.55.1                     |
+| DNSOption=ndots:1                   | --dns-option=ndots:1                   |
+| DNSSearch=foo.com                   | --dns-search=foo.com                   |
+| GIDMap=0:10000:10                   | --gidmap=0:10000:10                    |
 | GlobalArgs=--log-level=debug        | --log-level=debug                      |
+| IP=192.5.0.1                        | --ip 192.5.0.1                         |
+| IP6=2001:db8::1                     | --ip6 2001:db8::1                      |
 | Network=host                        | --network host                         |
 | NetworkAlias=name                   | --network-alias name                   |
 | PodmanArgs=\-\-cpus=2               | --cpus=2                               |
 | PodName=name                        | --name=name                            |
 | PublishPort=50-59                   | --publish 50-59                        |
 | ServiceName=name                    | Name the systemd unit `name.service`   |
+| SubGIDMap=gtest                     | --subgidname=gtest                     |
+| SubUIDMap=utest                     | --subuidname=utest                     |
+| UIDMap=0:10000:10                   | --uidmap=0:10000:10                    |
+| UserNS=keep-id:uid=200,gid=210      | --userns keep-id:uid=200,gid=210       |
 | Volume=/source:/dest                | --volume /source:/dest                 |
 
 Supported keys in the `[Pod]` section are:
 
+### `AddHost=`
+
+Add  host-to-IP mapping to /etc/hosts.
+The format is `hostname:ip`.
+
+Equivalent to the Podman `--add-host` option.
+This key can be listed multiple times.
+
 ### `ContainersConfModule=`
 
 Load the specified containers.conf(5) module. Equivalent to the Podman `--module` option.
+
+This key can be listed multiple times.
+
+### `DNS=`
+
+Set network-scoped DNS resolver/nameserver for containers in this pod.
+
+This key can be listed multiple times.
+
+### `DNSOption=`
+
+Set custom DNS options.
+
+This key can be listed multiple times.
+
+### `DNSSearch=`
+
+Set custom DNS search domains. Use **DNSSearch=.** to remove the search domain.
+
+This key can be listed multiple times.
+
+### `GIDMap=`
+
+Create the pod in a new user namespace using the supplied GID mapping.
+Equivalent to the Podman `--gidmap` option.
 
 This key can be listed multiple times.
 
@@ -895,6 +987,16 @@ The format of this is a space separated list of arguments, which can optionally 
 escaped to allow inclusion of whitespace and other control characters.
 
 This key can be listed multiple times.
+
+### `IP=`
+
+Specify a static IPv4 address for the pod, for example **10.88.64.128**.
+Equivalent to the Podman `--ip` option.
+
+### `IP6=`
+
+Specify a static IPv6 address for the pod, for example **fd46:db93:aa76:ac37::10**.
+Equivalent to the Podman `--ip6` option.
 
 ### `Network=`
 
@@ -965,6 +1067,28 @@ By default, Quadlet will name the systemd service unit by appending `-pod` to th
 Setting this key overrides this behavior by instructing Quadlet to use the provided name.
 
 Note, the name should not include the `.service` file extension
+
+### `SubGIDMap=`
+
+Create the pod in a new user namespace using the map with name in the /etc/subgid file.
+Equivalent to the Podman `--subgidname` option.
+
+### `SubUIDMap=`
+
+Create the pod in a new user namespace using the map with name in the /etc/subuid file.
+Equivalent to the Podman `--subuidname` option.
+
+### `UIDMap=`
+
+Create the pod in a new user namespace using the supplied UID mapping.
+Equivalent to the Podman `--uidmap` option.
+
+This key can be listed multiple times.
+
+### `UserNS=`
+
+Set the user namespace mode for the pod. This is equivalent to the Podman `--userns` option and
+generally has the form `MODE[:OPTIONS,...]`.
 
 ### `Volume=`
 
@@ -1545,6 +1669,8 @@ Specifies the name which is assigned to the resulting image if the build process
 successfully.
 
 This is equivalent to the `--tag` option of `podman build`.
+
+This key can be listed multiple times. The first instance will be used as the name of the created artifact when the `.build` file is referenced by another Quadlet unit.
 
 ### `Label=`
 

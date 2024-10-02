@@ -56,12 +56,14 @@ const (
 const (
 	KeyAddCapability         = "AddCapability"
 	KeyAddDevice             = "AddDevice"
+	KeyAddHost               = "AddHost"
 	KeyAllTags               = "AllTags"
 	KeyAnnotation            = "Annotation"
 	KeyArch                  = "Arch"
 	KeyAuthFile              = "AuthFile"
 	KeyAutoUpdate            = "AutoUpdate"
 	KeyCertDir               = "CertDir"
+	KeyCgroupsMode           = "CgroupsMode"
 	KeyConfigMap             = "ConfigMap"
 	KeyContainerName         = "ContainerName"
 	KeyContainersConfModule  = "ContainersConfModule"
@@ -91,6 +93,9 @@ const (
 	KeyGroupAdd              = "GroupAdd"
 	KeyHealthCmd             = "HealthCmd"
 	KeyHealthInterval        = "HealthInterval"
+	KeyHealthLogDestination  = "HealthLogDestination"
+	KeyHealthMaxLogCount     = "HealthMaxLogCount"
+	KeyHealthMaxLogSize      = "HealthMaxLogSize"
 	KeyHealthOnFailure       = "HealthOnFailure"
 	KeyHealthRetries         = "HealthRetries"
 	KeyHealthStartPeriod     = "HealthStartPeriod"
@@ -189,8 +194,10 @@ var (
 	supportedContainerKeys = map[string]bool{
 		KeyAddCapability:         true,
 		KeyAddDevice:             true,
+		KeyAddHost:               true,
 		KeyAnnotation:            true,
 		KeyAutoUpdate:            true,
+		KeyCgroupsMode:           true,
 		KeyContainerName:         true,
 		KeyContainersConfModule:  true,
 		KeyDNS:                   true,
@@ -210,6 +217,9 @@ var (
 		KeyHealthCmd:             true,
 		KeyHealthInterval:        true,
 		KeyHealthOnFailure:       true,
+		KeyHealthLogDestination:  true,
+		KeyHealthMaxLogCount:     true,
+		KeyHealthMaxLogSize:      true,
 		KeyHealthRetries:         true,
 		KeyHealthStartPeriod:     true,
 		KeyHealthStartupCmd:      true,
@@ -379,14 +389,29 @@ var (
 	}
 
 	supportedPodKeys = map[string]bool{
+		KeyAddHost:              true,
 		KeyContainersConfModule: true,
+		KeyDNS:                  true,
+		KeyDNSOption:            true,
+		KeyDNSSearch:            true,
+		KeyGIDMap:               true,
 		KeyGlobalArgs:           true,
+		KeyIP:                   true,
+		KeyIP6:                  true,
 		KeyNetwork:              true,
 		KeyNetworkAlias:         true,
 		KeyPodName:              true,
 		KeyPodmanArgs:           true,
 		KeyPublishPort:          true,
+		KeyRemapGid:             true,
+		KeyRemapUid:             true,
+		KeyRemapUidSize:         true,
+		KeyRemapUsers:           true,
 		KeyServiceName:          true,
+		KeySubGIDMap:            true,
+		KeySubUIDMap:            true,
+		KeyUIDMap:               true,
+		KeyUserNS:               true,
 		KeyVolume:               true,
 	}
 )
@@ -581,7 +606,12 @@ func ConvertContainer(container *parser.UnitFile, isUser bool, unitsInfoMap map[
 
 	// We delegate groups to the runtime
 	service.Add(ServiceGroup, "Delegate", "yes")
-	podman.add("--cgroups=split")
+
+	if cgroupsMode, ok := container.Lookup(ContainerGroup, KeyCgroupsMode); ok && len(cgroupsMode) > 0 {
+		podman.addf("--cgroups=%s", cgroupsMode)
+	} else {
+		podman.add("--cgroups=split")
+	}
 
 	timezone, ok := container.Lookup(ContainerGroup, KeyTimezone)
 	if ok && len(timezone) > 0 {
@@ -798,9 +828,7 @@ func ConvertContainer(container *parser.UnitFile, isUser bool, unitsInfoMap map[
 		podman.addf("--expose=%s", exposedPort)
 	}
 
-	if err := handlePublishPorts(container, ContainerGroup, podman); err != nil {
-		return nil, err
-	}
+	handlePublishPorts(container, ContainerGroup, podman)
 
 	podman.addEnv(podmanEnv)
 
@@ -812,6 +840,11 @@ func ConvertContainer(container *parser.UnitFile, isUser bool, unitsInfoMap map[
 	ip6, ok := container.Lookup(ContainerGroup, KeyIP6)
 	if ok && len(ip6) > 0 {
 		podman.add("--ip6", ip6)
+	}
+
+	addHosts := container.LookupAll(ContainerGroup, KeyAddHost)
+	for _, addHost := range addHosts {
+		podman.addf("--add-host=%s", addHost)
 	}
 
 	labels := container.LookupAllKeyVal(ContainerGroup, KeyLabel)
@@ -894,6 +927,13 @@ func ConvertContainer(container *parser.UnitFile, isUser bool, unitsInfoMap map[
 	}
 
 	service.AddCmdline(ServiceGroup, "ExecStart", podman.Args)
+
+	// XXX: only %N is handled.
+	// it is difficult to properly implement specifiers handling without consulting systemd.
+	resourceName := strings.ReplaceAll(containerName, "%N", unitInfo.ServiceName)
+	if !strings.Contains(resourceName, "%") {
+		unitInfo.ResourceName = resourceName
+	}
 
 	return service, nil
 }
@@ -1260,9 +1300,7 @@ func ConvertKube(kube *parser.UnitFile, unitsInfoMap map[string]*UnitInfo, isUse
 		execStart.add("--configmap", configMapPath)
 	}
 
-	if err := handlePublishPorts(kube, KubeGroup, execStart); err != nil {
-		return nil, err
-	}
+	handlePublishPorts(kube, KubeGroup, execStart)
 
 	handlePodmanArgs(kube, KubeGroup, execStart)
 
@@ -1468,7 +1506,10 @@ func ConvertBuild(build *parser.UnitFile, unitsInfoMap map[string]*UnitInfo) (*p
 	labels := build.LookupAllKeyVal(BuildGroup, KeyLabel)
 	podman.addLabels(labels)
 
-	podman.addf("--tag=%s", unitInfo.ResourceName)
+	imageTags := build.LookupAll(BuildGroup, KeyImageTag)
+	for _, imageTag := range imageTags {
+		podman.addf("--tag=%s", imageTag)
+	}
 
 	if err := addNetworks(build, BuildGroup, service, unitsInfoMap, podman); err != nil {
 		return nil, err
@@ -1529,8 +1570,9 @@ func ConvertBuild(build *parser.UnitFile, unitsInfoMap map[string]*UnitInfo) (*p
 }
 
 func GetBuiltImageName(buildUnit *parser.UnitFile) string {
-	if builtImageName, ok := buildUnit.Lookup(BuildGroup, KeyImageTag); ok {
-		return builtImageName
+	imageTags := buildUnit.LookupAll(BuildGroup, KeyImageTag)
+	if len(imageTags) > 0 {
+		return imageTags[0]
 	}
 	return ""
 }
@@ -1570,7 +1612,7 @@ func getServiceName(quadletUnitFile *parser.UnitFile, groupName string, defaultE
 	return removeExtension(quadletUnitFile.Filename, "", defaultExtraSuffix)
 }
 
-func ConvertPod(podUnit *parser.UnitFile, name string, unitsInfoMap map[string]*UnitInfo) (*parser.UnitFile, error) {
+func ConvertPod(podUnit *parser.UnitFile, name string, unitsInfoMap map[string]*UnitInfo, isUser bool) (*parser.UnitFile, error) {
 	unitInfo, ok := unitsInfoMap[podUnit.Filename]
 	if !ok {
 		return nil, fmt.Errorf("internal error while processing pod %s", podUnit.Filename)
@@ -1639,9 +1681,11 @@ func ConvertPod(podUnit *parser.UnitFile, name string, unitsInfoMap map[string]*
 		"--replace",
 	)
 
-	if err := handlePublishPorts(podUnit, PodGroup, execStartPre); err != nil {
+	if err := handleUserMappings(podUnit, PodGroup, execStartPre, isUser, true); err != nil {
 		return nil, err
 	}
+
+	handlePublishPorts(podUnit, PodGroup, execStartPre)
 
 	if err := addNetworks(podUnit, PodGroup, service, unitsInfoMap, execStartPre); err != nil {
 		return nil, err
@@ -1656,7 +1700,38 @@ func ConvertPod(podUnit *parser.UnitFile, name string, unitsInfoMap map[string]*
 		return nil, err
 	}
 
+	execStartPre.addf("--infra-name=%s-infra", podName)
 	execStartPre.addf("--name=%s", podName)
+
+	dns := podUnit.LookupAll(PodGroup, KeyDNS)
+	for _, ipAddr := range dns {
+		execStartPre.addf("--dns=%s", ipAddr)
+	}
+
+	dnsOptions := podUnit.LookupAll(PodGroup, KeyDNSOption)
+	for _, dnsOption := range dnsOptions {
+		execStartPre.addf("--dns-option=%s", dnsOption)
+	}
+
+	dnsSearches := podUnit.LookupAll(PodGroup, KeyDNSSearch)
+	for _, dnsSearch := range dnsSearches {
+		execStartPre.addf("--dns-search=%s", dnsSearch)
+	}
+
+	ip, ok := podUnit.Lookup(PodGroup, KeyIP)
+	if ok && len(ip) > 0 {
+		execStartPre.addf("--ip=%s", ip)
+	}
+
+	ip6, ok := podUnit.Lookup(PodGroup, KeyIP6)
+	if ok && len(ip6) > 0 {
+		execStartPre.addf("--ip6=%s", ip6)
+	}
+
+	addHosts := podUnit.LookupAll(PodGroup, KeyAddHost)
+	for _, addHost := range addHosts {
+		execStartPre.addf("--add-host=%s", addHost)
+	}
 
 	handlePodmanArgs(podUnit, PodGroup, execStartPre)
 
@@ -1775,7 +1850,7 @@ func handleUserRemap(unitFile *parser.UnitFile, groupName string, podman *Podman
 			autoOpts = append(autoOpts, fmt.Sprintf("size=%v", uidSize))
 		}
 
-		podman.addf("--userns=" + usernsOpts("auto", autoOpts))
+		podman.add("--userns=" + usernsOpts("auto", autoOpts))
 	case "keep-id":
 		if !isUser {
 			return fmt.Errorf("RemapUsers=keep-id is unsupported for system units")
@@ -1795,7 +1870,7 @@ func handleUserRemap(unitFile *parser.UnitFile, groupName string, podman *Podman
 			keepidOpts = append(keepidOpts, "gid="+gidMaps[0])
 		}
 
-		podman.addf("--userns=" + usernsOpts("keep-id", keepidOpts))
+		podman.add("--userns=" + usernsOpts("keep-id", keepidOpts))
 
 	default:
 		return fmt.Errorf("unsupported RemapUsers option '%s'", remapUsers)
@@ -1809,23 +1884,38 @@ func addNetworks(quadletUnitFile *parser.UnitFile, groupName string, serviceUnit
 	for _, network := range networks {
 		if len(network) > 0 {
 			quadletNetworkName, options, found := strings.Cut(network, ":")
-			if strings.HasSuffix(quadletNetworkName, ".network") {
-				// the podman network name is systemd-$name if none is specified by the user.
-				networkUnitInfo, ok := unitsInfoMap[quadletNetworkName]
+
+			isNetworkUnit := strings.HasSuffix(quadletNetworkName, ".network")
+			isContainerUnit := strings.HasSuffix(quadletNetworkName, ".container")
+
+			if isNetworkUnit || isContainerUnit {
+				unitInfo, ok := unitsInfoMap[quadletNetworkName]
 				if !ok {
-					return fmt.Errorf("requested Quadlet image %s was not found", quadletNetworkName)
+					return fmt.Errorf("requested Quadlet unit %s was not found", quadletNetworkName)
+				}
+
+				// XXX: this is usually because a '@' in service name
+				if len(unitInfo.ResourceName) == 0 {
+					return fmt.Errorf("cannot get the resource name of %s", quadletNetworkName)
 				}
 
 				// the systemd unit name is $serviceName.service
-				networkServiceName := networkUnitInfo.ServiceFileName()
+				serviceFileName := unitInfo.ServiceFileName()
 
-				serviceUnitFile.Add(UnitGroup, "Requires", networkServiceName)
-				serviceUnitFile.Add(UnitGroup, "After", networkServiceName)
+				serviceUnitFile.Add(UnitGroup, "Requires", serviceFileName)
+				serviceUnitFile.Add(UnitGroup, "After", serviceFileName)
 
 				if found {
-					network = fmt.Sprintf("%s:%s", networkUnitInfo.ResourceName, options)
+					if isContainerUnit {
+						return fmt.Errorf("extra options are not supported when joining another container's network")
+					}
+					network = fmt.Sprintf("%s:%s", unitInfo.ResourceName, options)
 				} else {
-					network = networkUnitInfo.ResourceName
+					if isContainerUnit {
+						network = fmt.Sprintf("container:%s", unitInfo.ResourceName)
+					} else {
+						network = unitInfo.ResourceName
+					}
 				}
 			}
 
@@ -1864,68 +1954,11 @@ func getAbsolutePath(quadletUnitFile *parser.UnitFile, filePath string) (string,
 	return filePath, nil
 }
 
-func handlePublishPorts(unitFile *parser.UnitFile, groupName string, podman *PodmanCmdline) error {
+func handlePublishPorts(unitFile *parser.UnitFile, groupName string, podman *PodmanCmdline) {
 	publishPorts := unitFile.LookupAll(groupName, KeyPublishPort)
 	for _, publishPort := range publishPorts {
-		publishPort = strings.TrimSpace(publishPort) // Allow whitespace after
-
-		// IP address could have colons in it. For example: "[::]:8080:80/tcp, so use custom splitter
-		parts := splitPorts(publishPort)
-
-		var containerPort string
-		ip := ""
-		hostPort := ""
-
-		// format (from podman run):
-		// ip:hostPort:containerPort | ip::containerPort | hostPort:containerPort | containerPort
-		//
-		// ip could be IPv6 with minimum of these chars "[::]"
-		// containerPort can have a suffix of "/tcp" or "/udp"
-		//
-
-		switch len(parts) {
-		case 1:
-			containerPort = parts[0]
-
-		case 2:
-			hostPort = parts[0]
-			containerPort = parts[1]
-
-		case 3:
-			ip = parts[0]
-			hostPort = parts[1]
-			containerPort = parts[2]
-
-		default:
-			return fmt.Errorf("invalid published port '%s'", publishPort)
-		}
-
-		if ip == "0.0.0.0" {
-			ip = ""
-		}
-
-		if len(hostPort) > 0 && !isPortRange(hostPort) {
-			return fmt.Errorf("invalid port format '%s'", hostPort)
-		}
-
-		if len(containerPort) > 0 && !isPortRange(containerPort) {
-			return fmt.Errorf("invalid port format '%s'", containerPort)
-		}
-
-		podman.add("--publish")
-		switch {
-		case len(ip) > 0 && len(hostPort) > 0:
-			podman.addf("%s:%s:%s", ip, hostPort, containerPort)
-		case len(ip) > 0:
-			podman.addf("%s::%s", ip, containerPort)
-		case len(hostPort) > 0:
-			podman.addf("%s:%s", hostPort, containerPort)
-		default:
-			podman.addf("%s", containerPort)
-		}
+		podman.add("--publish", publishPort)
 	}
-
-	return nil
 }
 
 func handleLogDriver(unitFile *parser.UnitFile, groupName string, podman *PodmanCmdline) {
@@ -1975,6 +2008,9 @@ func handleHealth(unitFile *parser.UnitFile, groupName string, podman *PodmanCmd
 		{KeyHealthCmd, "cmd"},
 		{KeyHealthInterval, "interval"},
 		{KeyHealthOnFailure, "on-failure"},
+		{KeyHealthLogDestination, "log-destination"},
+		{KeyHealthMaxLogCount, "max-log-count"},
+		{KeyHealthMaxLogSize, "max-log-size"},
 		{KeyHealthRetries, "retries"},
 		{KeyHealthStartPeriod, "start-period"},
 		{KeyHealthTimeout, "timeout"},

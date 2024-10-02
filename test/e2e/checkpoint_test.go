@@ -1,3 +1,5 @@
+//go:build linux || freebsd
+
 package integration
 
 import (
@@ -1115,9 +1117,6 @@ var _ = Describe("Podman checkpoint", func() {
 			"podman checkpoint and restore container out of and into pod (%s)",
 			share,
 		)
-
-		share := share // copy into local scope, for use inside function
-		index := index
 
 		It(testName, func() {
 			podName := "test_pod"

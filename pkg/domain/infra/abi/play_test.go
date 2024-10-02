@@ -1,3 +1,5 @@
+//go:build !remote
+
 package abi
 
 import (
@@ -148,7 +150,6 @@ data:
 	}
 
 	for _, test := range tests {
-		test := test
 		t.Run(test.name, func(t *testing.T) {
 			buf := bytes.NewReader([]byte(test.configMapContent))
 			cm, err := readConfigMapFromFile(buf)
@@ -194,7 +195,6 @@ kind: Pod
 	}
 
 	for _, test := range tests {
-		test := test
 		t.Run(test.name, func(t *testing.T) {
 			kind, err := getKubeKind([]byte(test.kubeYAML))
 			if test.expectError {
@@ -266,7 +266,6 @@ items:
 	}
 
 	for _, test := range tests {
-		test := test
 		t.Run(test.name, func(t *testing.T) {
 			docs, err := splitMultiDocYAML([]byte(test.kubeYAML))
 			if test.expectError {

@@ -3,11 +3,8 @@
 package libpod
 
 import (
-	"crypto/rand"
 	"fmt"
 	"net"
-	"os"
-	"path/filepath"
 
 	"github.com/containernetworking/plugins/pkg/ns"
 	"github.com/containers/common/libnetwork/types"
@@ -17,7 +14,6 @@ import (
 	"github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/sirupsen/logrus"
 	"github.com/vishvananda/netlink"
-	"golang.org/x/sys/unix"
 )
 
 // Create and configure a new network namespace for a container
@@ -104,32 +100,9 @@ func (r *Runtime) createNetNS(ctr *Container) (n string, q map[string]types.Stat
 // Configure the network namespace using the container process
 func (r *Runtime) setupNetNS(ctr *Container) error {
 	nsProcess := fmt.Sprintf("/proc/%d/ns/net", ctr.state.PID)
-
-	b := make([]byte, 16)
-
-	if _, err := rand.Reader.Read(b); err != nil {
-		return fmt.Errorf("failed to generate random netns name: %w", err)
-	}
-	nsPath, err := netns.GetNSRunDir()
+	nsPath, err := netns.NewNSFrom(nsProcess)
 	if err != nil {
 		return err
-	}
-	nsPath = filepath.Join(nsPath, fmt.Sprintf("netns-%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:]))
-
-	if err := os.MkdirAll(filepath.Dir(nsPath), 0711); err != nil {
-		return err
-	}
-
-	mountPointFd, err := os.Create(nsPath)
-	if err != nil {
-		return err
-	}
-	if err := mountPointFd.Close(); err != nil {
-		return err
-	}
-
-	if err := unix.Mount(nsProcess, nsPath, "none", unix.MS_BIND, ""); err != nil {
-		return fmt.Errorf("cannot mount %s: %w", nsPath, err)
 	}
 
 	networkStatus, err := r.configureNetNS(ctr, nsPath)
@@ -256,9 +229,13 @@ func (c *Container) inspectJoinedNetworkNS(networkns string) (q types.StatusBloc
 		}
 		var gateway net.IP
 		for _, route := range routes {
-			// default gateway
-			if route.Dst == nil {
-				gateway = route.Gw
+			// add default gateway
+			// Dst is set to 0.0.0.0/0 or ::/0 which is the default route
+			if route.Dst != nil && route.Dst.IP.IsUnspecified() {
+				ones, _ := route.Dst.Mask.Size()
+				if ones == 0 {
+					gateway = route.Gw
+				}
 			}
 		}
 		result.Interfaces = make(map[string]types.NetInterface)

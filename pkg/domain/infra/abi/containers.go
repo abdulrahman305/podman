@@ -1,3 +1,5 @@
+//go:build !remote
+
 package abi
 
 import (
@@ -18,7 +20,6 @@ import (
 	"github.com/containers/podman/v5/libpod"
 	"github.com/containers/podman/v5/libpod/define"
 	"github.com/containers/podman/v5/libpod/logs"
-	"github.com/containers/podman/v5/pkg/api/handlers"
 	"github.com/containers/podman/v5/pkg/checkpoint"
 	"github.com/containers/podman/v5/pkg/domain/entities"
 	"github.com/containers/podman/v5/pkg/domain/entities/reports"
@@ -35,6 +36,7 @@ import (
 	"github.com/containers/podman/v5/pkg/util"
 	"github.com/containers/storage"
 	"github.com/containers/storage/types"
+	"github.com/hashicorp/go-multierror"
 	"github.com/sirupsen/logrus"
 )
 
@@ -290,15 +292,35 @@ func (ic *ContainerEngine) ContainerStop(ctx context.Context, namesOrIds []strin
 				return err
 			}
 		}
-		err = c.Cleanup(ctx)
-		if err != nil {
-			// Issue #7384 and #11384: If the container is configured for
-			// auto-removal, it might already have been removed at this point.
-			// We still need to clean up since we do not know if the other cleanup process is successful
-			if c.AutoRemove() && (errors.Is(err, define.ErrNoSuchCtr) || errors.Is(err, define.ErrCtrRemoved)) {
-				return nil
+		if c.AutoRemove() {
+			_, imageName := c.Image()
+
+			if err := ic.Libpod.RemoveContainer(ctx, c, false, true, nil); err != nil {
+				// Issue #7384 and #11384: If the container is configured for
+				// auto-removal, it might already have been removed at this point.
+				// We still need to clean up since we do not know if the other cleanup process is successful
+				if !(errors.Is(err, define.ErrNoSuchCtr) || errors.Is(err, define.ErrCtrRemoved)) {
+					return err
+				}
 			}
-			return err
+
+			if c.AutoRemoveImage() {
+				imageEngine := ImageEngine{Libpod: ic.Libpod}
+				_, rmErrors := imageEngine.Remove(ctx, []string{imageName}, entities.ImageRemoveOptions{Ignore: true})
+				if len(rmErrors) > 0 {
+					mErr := multierror.Append(nil, rmErrors...)
+					return fmt.Errorf("removing container %s image %s: %w", c.ID(), imageName, mErr)
+				}
+			}
+		} else {
+			if err = c.Cleanup(ctx, false); err != nil {
+				// The container could still have been removed, as we unlocked
+				// after we stopped it.
+				if errors.Is(err, define.ErrNoSuchCtr) || errors.Is(err, define.ErrCtrRemoved) {
+					return nil
+				}
+				return err
+			}
 		}
 		return nil
 	})
@@ -586,7 +608,7 @@ func (ic *ContainerEngine) ContainerCommit(ctx context.Context, nameOrID string,
 	sc := ic.Libpod.SystemContext()
 	var changes []string
 	if len(options.Changes) > 0 {
-		changes = handlers.DecodeChanges(options.Changes)
+		changes = util.DecodeChanges(options.Changes)
 	}
 	var overrideConfig *manifest.Schema2Config
 	if len(options.Config) > 0 {
@@ -826,7 +848,7 @@ func makeExecConfig(options entities.ExecOptions, rt *libpod.Runtime) (*libpod.E
 		return nil, fmt.Errorf("retrieving Libpod configuration to build exec exit command: %w", err)
 	}
 	// TODO: Add some ability to toggle syslog
-	exitCommandArgs, err := specgenutil.CreateExitCommandArgs(storageConfig, runtimeConfig, logrus.IsLevelEnabled(logrus.DebugLevel), false, true)
+	exitCommandArgs, err := specgenutil.CreateExitCommandArgs(storageConfig, runtimeConfig, logrus.IsLevelEnabled(logrus.DebugLevel), false, false, true)
 	if err != nil {
 		return nil, fmt.Errorf("constructing exit command for exec session: %w", err)
 	}
@@ -1298,7 +1320,7 @@ func (ic *ContainerEngine) ContainerCleanup(ctx context.Context, namesOrIds []st
 				report.RmErr = fmt.Errorf("failed to clean up and remove container %v: %w", ctr.ID(), err)
 			}
 		} else {
-			err := ctr.Cleanup(ctx)
+			err := ctr.Cleanup(ctx, options.StoppedOnly)
 			// ignore error if ctr is removed or cannot be cleaned up, likely the ctr was already restarted by another process
 			if err != nil && !errors.Is(err, define.ErrNoSuchCtr) && !errors.Is(err, define.ErrCtrStateInvalid) {
 				report.CleanErr = fmt.Errorf("failed to clean up container %v: %w", ctr.ID(), err)
@@ -1392,10 +1414,14 @@ func (ic *ContainerEngine) ContainerMount(ctx context.Context, nameOrIDs []strin
 	for _, sctr := range storageCtrs {
 		mounted, path, err := ic.Libpod.IsStorageContainerMounted(sctr.ID)
 		if err != nil {
-			if errors.Is(err, types.ErrContainerUnknown) {
+			// ErrCtrExists means this is a libpod container, we handle that below.
+			// This can only happen in a narrow race because we first create the storage
+			// container and then the libpod container so the StorageContainers() call
+			// above would need to happen in that interval.
+			if errors.Is(err, types.ErrContainerUnknown) || errors.Is(err, types.ErrLayerUnknown) || errors.Is(err, define.ErrCtrExists) {
 				continue
 			}
-			return nil, err
+			return nil, fmt.Errorf("check if storage container is mounted: %w", err)
 		}
 
 		var name string
@@ -1423,7 +1449,7 @@ func (ic *ContainerEngine) ContainerMount(ctx context.Context, nameOrIDs []strin
 				errors.Is(err, define.ErrCtrRemoved) {
 				continue
 			}
-			return nil, err
+			return nil, fmt.Errorf("check if container is mounted: %w", err)
 		}
 
 		if mounted {
@@ -1731,6 +1757,10 @@ func (ic *ContainerEngine) ContainerClone(ctx context.Context, ctrCloneOpts enti
 		}
 		spec.Name = generate.CheckName(ic.Libpod, n, true)
 	}
+
+	spec.HealthLogDestination = define.DefaultHealthCheckLocalDestination
+	spec.HealthMaxLogCount = define.DefaultHealthMaxLogCount
+	spec.HealthMaxLogSize = define.DefaultHealthMaxLogSize
 
 	rtSpec, spec, opts, err := generate.MakeContainer(context.Background(), ic.Libpod, spec, true, c)
 	if err != nil {

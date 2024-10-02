@@ -5,6 +5,7 @@
 
 load helpers
 
+# bats test_tags=ci:parallel
 @test "podman logs - basic test" {
     rand_string=$(random_string 40)
 
@@ -62,10 +63,12 @@ function _log_test_tail() {
     run_podman rm $cid
 }
 
+# CANNOT BE PARALLELIZED - #23750, events-backend=file cannot coexist with journal
 @test "podman logs - tail test, k8s-file" {
     _log_test_tail k8s-file
 }
 
+# bats test_tags=ci:parallel
 @test "podman logs - tail test, journald" {
     # We can't use journald on RHEL as rootless: rhbz#1895105
     skip_if_journald_unavailable
@@ -117,10 +120,12 @@ ${cid[1]} b2"   "Sequential output from c2"
     run_podman rm -f -t0 ${cid[0]} ${cid[1]}
 }
 
+# CANNOT BE PARALLELIZED - #23750, events-backend=file cannot coexist with journal
 @test "podman logs - multi k8s-file" {
     _log_test_multi k8s-file
 }
 
+# bats test_tags=ci:parallel
 @test "podman logs - multi journald" {
     # We can't use journald on RHEL as rootless: rhbz#1895105
     skip_if_journald_unavailable
@@ -136,10 +141,6 @@ function _log_test_restarted() {
     fi
     cname="c-ltr-$(safename)"
     run_podman run --log-driver=$driver ${events_backend} --name $cname $IMAGE sh -c 'start=0; if test -s log; then start=`tail -n 1 log`; fi; seq `expr $start + 1` `expr $start + 10` | tee -a log'
-    # FIXME: #9597
-    # run/start is flaking for remote so let's wait for the container condition
-    # to stop wasting energy until the root cause gets fixed.
-    run_podman container wait --condition=exited --condition=stopped $cname
     run_podman ${events_backend} start -a $cname
     logfile=$(mktemp -p ${PODMAN_TMPDIR} logfileXXXXXXXX)
     $PODMAN $_PODMAN_TEST_OPTS ${events_backend} logs -f $cname > $logfile
@@ -150,10 +151,12 @@ function _log_test_restarted() {
     run_podman rm -f -t0 $cname
 }
 
+# CANNOT BE PARALLELIZED - #23750, events-backend=file cannot coexist with journal
 @test "podman logs restarted - k8s-file" {
     _log_test_restarted k8s-file
 }
 
+# bats test_tags=ci:parallel
 @test "podman logs restarted journald" {
     # We can't use journald on RHEL as rootless: rhbz#1895105
     skip_if_journald_unavailable
@@ -161,6 +164,7 @@ function _log_test_restarted() {
     _log_test_restarted journald
 }
 
+# CANNOT BE PARALLELIZED - #23750, events-backend=file cannot coexist with journal
 @test "podman logs - journald log driver requires journald events backend" {
     skip_if_remote "remote does not support --events-backend"
     # We can't use journald on RHEL as rootless: rhbz#1895105
@@ -207,10 +211,12 @@ $s_after"
     run_podman rm -t 1 -f $cname
 }
 
+# CANNOT BE PARALLELIZED - #23750, events-backend=file cannot coexist with journal
 @test "podman logs - since k8s-file" {
     _log_test_since k8s-file
 }
 
+# bats test_tags=ci:parallel
 @test "podman logs - since journald" {
     # We can't use journald on RHEL as rootless: rhbz#1895105
     skip_if_journald_unavailable
@@ -260,10 +266,12 @@ $s_after"
     run_podman rm -t 0 -f $cname
 }
 
+# CANNOT BE PARALLELIZED - #23750, events-backend=file cannot coexist with journal
 @test "podman logs - until k8s-file" {
     _log_test_until k8s-file
 }
 
+# bats test_tags=ci:parallel
 @test "podman logs - until journald" {
     # We can't use journald on RHEL as rootless: rhbz#1895105
     skip_if_journald_unavailable
@@ -293,10 +301,12 @@ $contentC" "logs -f on exited container works"
     run_podman ${events_backend} rm -t 0 -f $cname
 }
 
+# CANNOT BE PARALLELIZED - #23750, events-backend=file cannot coexist with journal
 @test "podman logs - --follow k8s-file" {
     _log_test_follow k8s-file
 }
 
+# bats test_tags=ci:parallel
 @test "podman logs - --follow journald" {
     # We can't use journald on RHEL as rootless: rhbz#1895105
     skip_if_journald_unavailable
@@ -324,7 +334,7 @@ function _log_test_follow_since() {
 
     # Now do the same with a running container to check #16950.
     run_podman ${events_backend} run --log-driver=$driver --name $cname -d $IMAGE \
-        sh -c "sleep 1; while :; do echo $content && sleep 5; done"
+        sh -c "sleep 1; while :; do echo $content && sleep 1; done"
 
     # sleep is required to make sure the podman event backend no longer sees the start event in the log
     # This value must be greater or equal than the value given in --since below
@@ -332,17 +342,18 @@ function _log_test_follow_since() {
 
     # Make sure podman logs actually follows by giving a low timeout and check that the command times out
     PODMAN_TIMEOUT=3 run_podman 124 ${events_backend} logs --since 0.1s -f $cname
-    assert "$output" =~ "^$content
+    assert "$output" =~ "$content
 timeout: sending signal TERM to command.*" "logs --since -f on running container works"
 
     run_podman ${events_backend} rm -t 0 -f $cname
 }
 
+# CANNOT BE PARALLELIZED - #23750, events-backend=file cannot coexist with journal
 @test "podman logs - --since --follow k8s-file" {
     _log_test_follow_since k8s-file
 }
 
-# bats test_tags=distro-integration
+# bats test_tags=distro-integration, ci:parallel
 @test "podman logs - --since --follow journald" {
     # We can't use journald on RHEL as rootless: rhbz#1895105
     skip_if_journald_unavailable
@@ -363,16 +374,16 @@ function _log_test_follow_until() {
     run_podman ${events_backend} run --log-driver=$driver --name $cname -d $IMAGE \
         sh -c "n=1;while :; do echo $content--\$n; n=\$((n+1));sleep 0.1; done"
 
-    t0=$SECONDS
+    t0=$(date +%s%3N)
     # The logs command should exit after the until time even when follow is set
     PODMAN_TIMEOUT=10 run_podman ${events_backend} logs --until 3s -f $cname
-    t1=$SECONDS
+    t1=$(date +%s%3N)
     logs_seen="$output"
 
-    # The delta should be 3 but because it could be a bit longer on a slow system such as CI we also accept 4.
-    delta_t=$(( $t1 - $t0 ))
-    assert $delta_t -gt 2 "podman logs --until: exited too early!"
-    assert $delta_t -lt 5 "podman logs --until: exited too late!"
+    # The delta should be 3 but could be longer on a slow CI system
+    delta_t_ms=$(( $t1 - $t0 ))
+    assert $delta_t_ms -gt 2000 "podman logs --until: exited too early!"
+    assert $delta_t_ms -lt 5000 "podman logs --until: exited too late!"
 
     # Impossible to know how many lines we'll see, but require at least two
     assert "$logs_seen" =~ "$content--1
@@ -381,11 +392,12 @@ $content--2.*" "logs --until -f on running container works"
     run_podman ${events_backend} rm -t 0 -f $cname
 }
 
+# CANNOT BE PARALLELIZED - #23750, events-backend=file cannot coexist with journal
 @test "podman logs - --until --follow k8s-file" {
     _log_test_follow_until k8s-file
 }
 
-# bats test_tags=distro-integration
+# bats test_tags=distro-integration, ci:parallel
 @test "podman logs - --until --follow journald" {
     # We can't use journald on RHEL as rootless: rhbz#1895105
     skip_if_journald_unavailable
@@ -394,6 +406,7 @@ $content--2.*" "logs --until -f on running container works"
 }
 
 # https://github.com/containers/podman/issues/19545
+# CANNOT BE PARALLELIZED - #23750, events-backend=file cannot coexist with journal
 @test "podman logs --tail, k8s-file with partial lines" {
     cname="c-$(safename)"
 

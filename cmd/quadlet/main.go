@@ -4,6 +4,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/user"
 	"path"
@@ -55,12 +56,6 @@ var (
 	}
 )
 
-var (
-	unitDirAdminUser         string
-	resolvedUnitDirAdminUser string
-	systemUserDirLevel       int
-)
-
 // We log directly to /dev/kmsg, because that is the only way to get information out
 // of the generator into the system logs.
 func logToKmsg(s string) bool {
@@ -108,117 +103,207 @@ func Debugf(format string, a ...interface{}) {
 	}
 }
 
+type searchPaths struct {
+	sorted []string
+	// map to store paths so we can quickly check if we saw them already and not loop in case of symlinks
+	visitedDirs map[string]struct{}
+}
+
+func newSearchPaths() *searchPaths {
+	return &searchPaths{
+		sorted:      make([]string, 0),
+		visitedDirs: make(map[string]struct{}, 0),
+	}
+}
+
+func (s *searchPaths) Add(path string) {
+	s.sorted = append(s.sorted, path)
+	s.visitedDirs[path] = struct{}{}
+}
+
+func (s *searchPaths) Visited(path string) bool {
+	_, visited := s.visitedDirs[path]
+	return visited
+}
+
 // This returns the directories where we read quadlet .container and .volumes from
 // For system generators these are in /usr/share/containers/systemd (for distro files)
 // and /etc/containers/systemd (for sysadmin files).
 // For user generators these can live in $XDG_RUNTIME_DIR/containers/systemd, /etc/containers/systemd/users, /etc/containers/systemd/users/$UID, and $XDG_CONFIG_HOME/containers/systemd
 func getUnitDirs(rootless bool) []string {
+	paths := newSearchPaths()
+
 	// Allow overriding source dir, this is mainly for the CI tests
-	unitDirsEnv := os.Getenv("QUADLET_UNIT_DIRS")
-	dirs := make([]string, 0)
-
-	unitDirAdminUser = filepath.Join(quadlet.UnitDirAdmin, "users")
-	var err error
-	if resolvedUnitDirAdminUser, err = filepath.EvalSymlinks(unitDirAdminUser); err != nil {
-		Debugf("Error occurred resolving path %q: %s", unitDirAdminUser, err)
-		resolvedUnitDirAdminUser = unitDirAdminUser
+	if getDirsFromEnv(paths) {
+		return paths.sorted
 	}
-	systemUserDirLevel = len(strings.Split(resolvedUnitDirAdminUser, string(os.PathSeparator)))
 
-	if len(unitDirsEnv) > 0 {
-		for _, eachUnitDir := range strings.Split(unitDirsEnv, ":") {
-			if !filepath.IsAbs(eachUnitDir) {
-				Logf("%s not a valid file path", eachUnitDir)
-				return nil
-			}
-			dirs = appendSubPaths(dirs, eachUnitDir, false, nil)
-		}
-		return dirs
-	}
+	resolvedUnitDirAdminUser := resolveUnitDirAdminUser()
+	userLevelFilter := getUserLevelFilter(resolvedUnitDirAdminUser)
 
 	if rootless {
-		runtimeDir, found := os.LookupEnv("XDG_RUNTIME_DIR")
-		if found {
-			dirs = appendSubPaths(dirs, path.Join(runtimeDir, "containers/systemd"), false, nil)
-		}
-
-		configDir, err := os.UserConfigDir()
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: %v", err)
-			return nil
-		}
-		dirs = appendSubPaths(dirs, path.Join(configDir, "containers/systemd"), false, nil)
-		u, err := user.Current()
-		if err == nil {
-			dirs = appendSubPaths(dirs, filepath.Join(quadlet.UnitDirAdmin, "users"), true, nonNumericFilter)
-			dirs = appendSubPaths(dirs, filepath.Join(quadlet.UnitDirAdmin, "users", u.Uid), true, userLevelFilter)
-		} else {
-			fmt.Fprintf(os.Stderr, "Warning: %v", err)
-		}
-		return append(dirs, filepath.Join(quadlet.UnitDirAdmin, "users"))
+		systemUserDirLevel := len(strings.Split(resolvedUnitDirAdminUser, string(os.PathSeparator)))
+		nonNumericFilter := getNonNumericFilter(resolvedUnitDirAdminUser, systemUserDirLevel)
+		getRootlessDirs(paths, nonNumericFilter, userLevelFilter)
+	} else {
+		getRootDirs(paths, userLevelFilter)
 	}
-
-	dirs = appendSubPaths(dirs, quadlet.UnitDirTemp, false, userLevelFilter)
-	dirs = appendSubPaths(dirs, quadlet.UnitDirAdmin, false, userLevelFilter)
-	return appendSubPaths(dirs, quadlet.UnitDirDistro, false, nil)
+	return paths.sorted
 }
 
-func appendSubPaths(dirs []string, path string, isUserFlag bool, filterPtr func(string, bool) bool) []string {
-	resolvedPath, err := filepath.EvalSymlinks(path)
-	if err != nil {
-		Debugf("Error occurred resolving path %q: %s", path, err)
-		// Despite the failure add the path to the list for logging purposes
-		// This is the equivalent of adding the path when info==nil below
-		dirs = append(dirs, path)
-		return dirs
+func getDirsFromEnv(paths *searchPaths) bool {
+	unitDirsEnv := os.Getenv("QUADLET_UNIT_DIRS")
+	if len(unitDirsEnv) == 0 {
+		return false
 	}
 
-	err = filepath.WalkDir(resolvedPath, func(_path string, info os.DirEntry, err error) error {
-		// Ignore drop-in directory subpaths
-		if !strings.HasSuffix(_path, ".d") {
-			if info == nil || info.IsDir() {
-				if filterPtr == nil || filterPtr(_path, isUserFlag) {
-					dirs = append(dirs, _path)
-				}
-			}
+	for _, eachUnitDir := range strings.Split(unitDirsEnv, ":") {
+		if !filepath.IsAbs(eachUnitDir) {
+			Logf("%s not a valid file path", eachUnitDir)
+			break
 		}
-		return err
-	})
+		appendSubPaths(paths, eachUnitDir, false, nil)
+	}
+	return true
+}
+
+func getRootlessDirs(paths *searchPaths, nonNumericFilter, userLevelFilter func(string, bool) bool) {
+	runtimeDir, found := os.LookupEnv("XDG_RUNTIME_DIR")
+	if found {
+		appendSubPaths(paths, path.Join(runtimeDir, "containers/systemd"), false, nil)
+	}
+
+	configDir, err := os.UserConfigDir()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: %v", err)
+		return
+	}
+	appendSubPaths(paths, path.Join(configDir, "containers/systemd"), false, nil)
+
+	u, err := user.Current()
+	if err == nil {
+		appendSubPaths(paths, filepath.Join(quadlet.UnitDirAdmin, "users"), true, nonNumericFilter)
+		appendSubPaths(paths, filepath.Join(quadlet.UnitDirAdmin, "users", u.Uid), true, userLevelFilter)
+	} else {
+		fmt.Fprintf(os.Stderr, "Warning: %v", err)
+	}
+
+	paths.Add(filepath.Join(quadlet.UnitDirAdmin, "users"))
+}
+
+func getRootDirs(paths *searchPaths, userLevelFilter func(string, bool) bool) {
+	appendSubPaths(paths, quadlet.UnitDirTemp, false, userLevelFilter)
+	appendSubPaths(paths, quadlet.UnitDirAdmin, false, userLevelFilter)
+	appendSubPaths(paths, quadlet.UnitDirDistro, false, nil)
+}
+
+func resolveUnitDirAdminUser() string {
+	unitDirAdminUser := filepath.Join(quadlet.UnitDirAdmin, "users")
+	var err error
+	var resolvedUnitDirAdminUser string
+	if resolvedUnitDirAdminUser, err = filepath.EvalSymlinks(unitDirAdminUser); err != nil {
+		if !errors.Is(err, fs.ErrNotExist) {
+			Debugf("Error occurred resolving path %q: %s", unitDirAdminUser, err)
+		}
+		resolvedUnitDirAdminUser = unitDirAdminUser
+	}
+	return resolvedUnitDirAdminUser
+}
+
+func appendSubPaths(paths *searchPaths, path string, isUserFlag bool, filterPtr func(string, bool) bool) {
+	resolvedPath, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		if !errors.Is(err, fs.ErrNotExist) {
+			Debugf("Error occurred resolving path %q: %s", path, err)
+		}
+		// Despite the failure add the path to the list for logging purposes
+		// This is the equivalent of adding the path when info==nil below
+		paths.Add(path)
+		return
+	}
+
+	if skipPath(paths, resolvedPath, isUserFlag, filterPtr) {
+		return
+	}
+
+	// Add the current directory
+	paths.Add(resolvedPath)
+
+	// Read the contents of the directory
+	entries, err := os.ReadDir(resolvedPath)
 	if err != nil {
 		if !errors.Is(err, os.ErrNotExist) {
 			Debugf("Error occurred walking sub directories %q: %s", path, err)
 		}
+		return
 	}
-	return dirs
+
+	// Recursively run through the contents of the directory
+	for _, entry := range entries {
+		fullPath := filepath.Join(resolvedPath, entry.Name())
+		appendSubPaths(paths, fullPath, isUserFlag, filterPtr)
+	}
 }
 
-func nonNumericFilter(_path string, isUserFlag bool) bool {
-	// when running in rootless, recursive walk directories that are non numeric
-	// ignore sub dirs under the `users` directory which correspond to a user id
-	if strings.HasPrefix(_path, resolvedUnitDirAdminUser) {
-		listDirUserPathLevels := strings.Split(_path, string(os.PathSeparator))
-		if len(listDirUserPathLevels) > systemUserDirLevel {
-			if !(regexp.MustCompile(`^[0-9]*$`).MatchString(listDirUserPathLevels[systemUserDirLevel])) {
-				return true
-			}
-		}
-	} else {
+func skipPath(paths *searchPaths, path string, isUserFlag bool, filterPtr func(string, bool) bool) bool {
+	// If the path is already in the map no need to read it again
+	if paths.Visited(path) {
 		return true
 	}
-	return false
+
+	// Don't traverse drop-in directories
+	if strings.HasSuffix(path, ".d") {
+		return true
+	}
+
+	// Check if the directory should be filtered out
+	if filterPtr != nil && !filterPtr(path, isUserFlag) {
+		return true
+	}
+
+	stat, err := os.Stat(path)
+	if err != nil {
+		if !errors.Is(err, fs.ErrNotExist) {
+			Debugf("Error occurred resolving path %q: %s", path, err)
+		}
+		return true
+	}
+
+	// Not a directory nothing to add
+	return !stat.IsDir()
 }
 
-func userLevelFilter(_path string, isUserFlag bool) bool {
-	// if quadlet generator is run rootless, do not recurse other user sub dirs
-	// if quadlet generator is run as root, ignore users sub dirs
-	if strings.HasPrefix(_path, resolvedUnitDirAdminUser) {
-		if isUserFlag {
+func getNonNumericFilter(resolvedUnitDirAdminUser string, systemUserDirLevel int) func(string, bool) bool {
+	return func(path string, isUserFlag bool) bool {
+		// when running in rootless, recursive walk directories that are non numeric
+		// ignore sub dirs under the `users` directory which correspond to a user id
+		if strings.HasPrefix(path, resolvedUnitDirAdminUser) {
+			listDirUserPathLevels := strings.Split(path, string(os.PathSeparator))
+			if len(listDirUserPathLevels) > systemUserDirLevel {
+				if !(regexp.MustCompile(`^[0-9]*$`).MatchString(listDirUserPathLevels[systemUserDirLevel])) {
+					return true
+				}
+			}
+		} else {
 			return true
 		}
-	} else {
-		return true
+		return false
 	}
-	return false
+}
+
+func getUserLevelFilter(resolvedUnitDirAdminUser string) func(string, bool) bool {
+	return func(_path string, isUserFlag bool) bool {
+		// if quadlet generator is run rootless, do not recurse other user sub dirs
+		// if quadlet generator is run as root, ignore users sub dirs
+		if strings.HasPrefix(_path, resolvedUnitDirAdminUser) {
+			if isUserFlag {
+				return true
+			}
+		} else {
+			return true
+		}
+		return false
+	}
 }
 
 func isExtSupported(filename string) bool {
@@ -588,10 +673,10 @@ func process() error {
 		Debugf("Starting quadlet-generator, output to: %s", outputPath)
 	}
 
-	sourcePaths := getUnitDirs(isUserFlag)
+	sourcePathsMap := getUnitDirs(isUserFlag)
 
 	var units []*parser.UnitFile
-	for _, d := range sourcePaths {
+	for _, d := range sourcePathsMap {
 		if result, err := loadUnitsFromDir(d); err != nil {
 			reportError(err)
 		} else {
@@ -602,12 +687,12 @@ func process() error {
 	if len(units) == 0 {
 		// containers/podman/issues/17374: exit cleanly but log that we
 		// had nothing to do
-		Debugf("No files parsed from %s", sourcePaths)
+		Debugf("No files parsed from %s", sourcePathsMap)
 		return prevError
 	}
 
 	for _, unit := range units {
-		if err := loadUnitDropins(unit, sourcePaths); err != nil {
+		if err := loadUnitDropins(unit, sourcePathsMap); err != nil {
 			reportError(err)
 		}
 	}
@@ -658,7 +743,7 @@ func process() error {
 		case strings.HasSuffix(unit.Filename, ".build"):
 			service, err = quadlet.ConvertBuild(unit, unitsInfoMap)
 		case strings.HasSuffix(unit.Filename, ".pod"):
-			service, err = quadlet.ConvertPod(unit, unit.Filename, unitsInfoMap)
+			service, err = quadlet.ConvertPod(unit, unit.Filename, unitsInfoMap, isUserFlag)
 		default:
 			Logf("Unsupported file type %q", unit.Filename)
 			continue

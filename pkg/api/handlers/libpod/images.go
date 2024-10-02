@@ -1,3 +1,5 @@
+//go:build !remote
+
 package libpod
 
 import (
@@ -116,8 +118,9 @@ func PruneImages(w http.ResponseWriter, r *http.Request) {
 	runtime := r.Context().Value(api.RuntimeKey).(*libpod.Runtime)
 	decoder := r.Context().Value(api.DecoderKey).(*schema.Decoder)
 	query := struct {
-		All      bool `schema:"all"`
-		External bool `schema:"external"`
+		All        bool `schema:"all"`
+		External   bool `schema:"external"`
+		BuildCache bool `schema:"buildcache"`
 	}{
 		// override any golang type defaults
 	}
@@ -155,9 +158,10 @@ func PruneImages(w http.ResponseWriter, r *http.Request) {
 	imageEngine := abi.ImageEngine{Libpod: runtime}
 
 	pruneOptions := entities.ImagePruneOptions{
-		All:      query.All,
-		External: query.External,
-		Filter:   libpodFilters,
+		All:        query.All,
+		External:   query.External,
+		Filter:     libpodFilters,
+		BuildCache: query.BuildCache,
 	}
 	imagePruneReports, err := imageEngine.Prune(r.Context(), pruneOptions)
 	if err != nil {
@@ -499,7 +503,7 @@ func CommitContainer(w http.ResponseWriter, r *http.Request) {
 	options.Author = query.Author
 	options.Pause = query.Pause
 	options.Squash = query.Squash
-	options.Changes = handlers.DecodeChanges(query.Changes)
+	options.Changes = util.DecodeChanges(query.Changes)
 	ctr, err := runtime.LookupContainer(query.Container)
 	if err != nil {
 		utils.Error(w, http.StatusNotFound, err)

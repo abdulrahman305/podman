@@ -1,3 +1,5 @@
+//go:build linux || freebsd
+
 package integration
 
 import (
@@ -609,7 +611,8 @@ var _ = Describe("Podman pull", func() {
 			_, wrongPrivateKeyFileName, err := WriteRSAKeyPair(wrongKeyFileName, bitSize)
 			Expect(err).ToNot(HaveOccurred())
 
-			session := podmanTest.Podman([]string{"push", "-q", "--encryption-key", "jwe:" + publicKeyFileName, "--tls-verify=false", "--remove-signatures", ALPINE, imgPath})
+			// Force zstd here because zstd:chunked throws a warning, https://github.com/containers/image/issues/2485.
+			session := podmanTest.Podman([]string{"push", "-q", "--compression-format=zstd", "--encryption-key", "jwe:" + publicKeyFileName, "--tls-verify=false", "--remove-signatures", ALPINE, imgPath})
 			session.WaitWithDefaultTimeout()
 			Expect(session).Should(ExitCleanly())
 
@@ -667,8 +670,7 @@ var _ = Describe("Podman pull", func() {
 			}
 			lock := GetPortLock("5012")
 			defer lock.Unlock()
-			// FIXME: #23517: using network slirp4netns as work around
-			session := podmanTest.Podman([]string{"run", "-d", "--network", "slirp4netns", "--name", "registry", "-p", "5012:5000", REGISTRY_IMAGE, "/entrypoint.sh", "/etc/docker/registry/config.yml"})
+			session := podmanTest.Podman([]string{"run", "-d", "--name", "registry", "-p", "5012:5000", REGISTRY_IMAGE, "/entrypoint.sh", "/etc/docker/registry/config.yml"})
 			session.WaitWithDefaultTimeout()
 			Expect(session).Should(ExitCleanly())
 

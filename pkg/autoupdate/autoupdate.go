@@ -131,7 +131,7 @@ func AutoUpdate(ctx context.Context, runtime *libpod.Runtime, options entities.A
 	// Connect to DBUS.
 	conn, err := systemd.ConnectToDBUS()
 	if err != nil {
-		logrus.Errorf(err.Error())
+		logrus.Error(err.Error())
 		allErrors = append(allErrors, err)
 		return nil, allErrors
 	}
@@ -480,7 +480,7 @@ func (u *updater) assembleImageMap(ctx context.Context) (map[string]*libimage.Im
 	listOptions := &libimage.ListImagesOptions{
 		Filters: []string{"readonly=false"},
 	}
-	imagesSlice, err := u.runtime.LibimageRuntime().ListImages(ctx, nil, listOptions)
+	imagesSlice, err := u.runtime.LibimageRuntime().ListImages(ctx, listOptions)
 	if err != nil {
 		return nil, err
 	}

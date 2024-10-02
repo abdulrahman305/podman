@@ -1123,10 +1123,9 @@ func (c *Container) init(ctx context.Context, retainRetries bool) error {
 	// bugzilla.redhat.com/show_bug.cgi?id=2144754:
 	// In case of a restart, make sure to remove the healthcheck log to
 	// have a clean state.
-	if path := c.healthCheckLogPath(); path != "" {
-		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-			logrus.Error(err)
-		}
+	err = c.writeHealthCheckLog(define.HealthCheckResults{Status: define.HealthCheckReset})
+	if err != nil {
+		return err
 	}
 
 	if err := c.save(); err != nil {
@@ -2163,6 +2162,11 @@ func (c *Container) stopPodIfNeeded(ctx context.Context) error {
 		return nil
 	}
 
+	// Never try to stop the pod when a init container stopped
+	if c.IsInitCtr() {
+		return nil
+	}
+
 	pod, err := c.runtime.state.Pod(c.config.Pod)
 	if err != nil {
 		return fmt.Errorf("container %s is in pod %s, but pod cannot be retrieved: %w", c.ID(), c.config.Pod, err)
@@ -2222,7 +2226,6 @@ func (c *Container) postDeleteHooks(ctx context.Context) error {
 				return err
 			}
 			for i, hook := range extensionHooks {
-				hook := hook
 				logrus.Debugf("container %s: invoke poststop hook %d, path %s", c.ID(), i, hook.Path)
 				var stderr, stdout bytes.Buffer
 				hookErr, err := exec.RunWithOptions(

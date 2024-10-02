@@ -19,6 +19,7 @@ import (
 	"github.com/containers/common/pkg/cgroups"
 	"github.com/containers/common/pkg/config"
 	"github.com/containers/podman/v5/libpod/define"
+	"github.com/containers/podman/v5/libpod/shutdown"
 	"github.com/containers/podman/v5/pkg/rootless"
 	spec "github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/opencontainers/runtime-tools/generate"
@@ -66,6 +67,9 @@ func (c *Container) prepare() error {
 		mountPoint                      string
 		tmpStateLock                    sync.Mutex
 	)
+
+	shutdown.Inhibit()
+	defer shutdown.Uninhibit()
 
 	wg.Add(2)
 
@@ -617,12 +621,16 @@ func (c *Container) setCgroupsPath(g *generate.Generator) error {
 
 // addSpecialDNS adds special dns servers for slirp4netns and pasta
 func (c *Container) addSpecialDNS(nameservers []string) []string {
-	if c.pastaResult != nil {
+	switch {
+	case c.config.NetMode.IsBridge():
+		info, err := c.runtime.network.RootlessNetnsInfo()
+		if err == nil {
+			nameservers = append(nameservers, info.DnsForwardIps...)
+		}
+	case c.pastaResult != nil:
 		nameservers = append(nameservers, c.pastaResult.DNSForwardIPs...)
-	}
-
-	// slirp4netns has a built in DNS forwarder.
-	if c.config.NetMode.IsSlirp4netns() {
+	case c.config.NetMode.IsSlirp4netns():
+		// slirp4netns has a built in DNS forwarder.
 		slirp4netnsDNS, err := slirp4netns.GetDNS(c.slirp4netnsSubnet)
 		if err != nil {
 			logrus.Warn("Failed to determine Slirp4netns DNS: ", err.Error())
@@ -694,16 +702,14 @@ func (c *Container) makePlatformBindMounts() error {
 }
 
 func (c *Container) getConmonPidFd() int {
-	if c.state.ConmonPID != 0 {
-		// Track lifetime of conmon precisely using pidfd_open + poll.
-		// There are many cases for this to fail, for instance conmon is dead
-		// or pidfd_open is not supported (pre linux 5.3), so fall back to the
-		// traditional loop with poll + sleep
-		if fd, err := unix.PidfdOpen(c.state.ConmonPID, 0); err == nil {
-			return fd
-		} else if err != unix.ENOSYS && err != unix.ESRCH {
-			logrus.Debugf("PidfdOpen(%d) failed: %v", c.state.ConmonPID, err)
-		}
+	// Track lifetime of conmon precisely using pidfd_open + poll.
+	// There are many cases for this to fail, for instance conmon is dead
+	// or pidfd_open is not supported (pre linux 5.3), so fall back to the
+	// traditional loop with poll + sleep
+	if fd, err := unix.PidfdOpen(c.state.ConmonPID, 0); err == nil {
+		return fd
+	} else if err != unix.ENOSYS && err != unix.ESRCH {
+		logrus.Debugf("PidfdOpen(%d) failed: %v", c.state.ConmonPID, err)
 	}
 	return -1
 }
