@@ -11,17 +11,19 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"unicode"
 
-	"github.com/containerd/containerd/platforms"
+	"github.com/containerd/platforms"
 	"github.com/containers/buildah/define"
 	mkcwtypes "github.com/containers/buildah/internal/mkcw/types"
 	internalParse "github.com/containers/buildah/internal/parse"
 	"github.com/containers/buildah/internal/sbom"
 	"github.com/containers/buildah/internal/tmpdir"
 	"github.com/containers/buildah/pkg/sshagent"
+	"github.com/containers/common/libnetwork/etchosts"
 	"github.com/containers/common/pkg/auth"
 	"github.com/containers/common/pkg/config"
 	"github.com/containers/common/pkg/parse"
@@ -34,6 +36,7 @@ import (
 	securejoin "github.com/cyphar/filepath-securejoin"
 	units "github.com/docker/go-units"
 	specs "github.com/opencontainers/runtime-spec/specs-go"
+	"github.com/opencontainers/selinux/go-selinux"
 	"github.com/openshift/imagebuilder"
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
@@ -57,6 +60,8 @@ const (
 	BuildahCacheDir = "buildah-cache"
 )
 
+var errInvalidSecretSyntax = errors.New("incorrect secret flag format: should be --secret id=foo,src=bar[,env=ENV][,type=file|env]")
+
 // RepoNamesToNamedReferences parse the raw string to Named reference
 func RepoNamesToNamedReferences(destList []string) ([]reference.Named, error) {
 	var result []reference.Named
@@ -76,6 +81,25 @@ func RepoNamesToNamedReferences(destList []string) ([]reference.Named, error) {
 // CommonBuildOptions parses the build options from the bud cli
 func CommonBuildOptions(c *cobra.Command) (*define.CommonBuildOptions, error) {
 	return CommonBuildOptionsFromFlagSet(c.Flags(), c.Flag)
+}
+
+// If user selected to run with currentLabelOpts then append on the current user and role
+func currentLabelOpts() ([]string, error) {
+	label, err := selinux.CurrentLabel()
+	if err != nil {
+		return nil, err
+	}
+	if label == "" {
+		return nil, nil
+	}
+	con, err := selinux.NewContext(label)
+	if err != nil {
+		return nil, err
+	}
+	return []string{
+		fmt.Sprintf("label=user:%s", con["user"]),
+		fmt.Sprintf("label=role:%s", con["role"]),
+	}, nil
 }
 
 // CommonBuildOptionsFromFlagSet parses the build options from the bud cli
@@ -160,7 +184,11 @@ func CommonBuildOptionsFromFlagSet(flags *pflag.FlagSet, findFlagFunc func(name 
 	cpuQuota, _ := flags.GetInt64("cpu-quota")
 	cpuShares, _ := flags.GetUint64("cpu-shares")
 	httpProxy, _ := flags.GetBool("http-proxy")
-	identityLabel, _ := flags.GetBool("identity-label")
+	var identityLabel types.OptionalBool
+	if flags.Changed("identity-label") {
+		b, _ := flags.GetBool("identity-label")
+		identityLabel = types.NewOptionalBool(b)
+	}
 	omitHistory, _ := flags.GetBool("omit-history")
 
 	ulimit := []string{}
@@ -184,7 +212,7 @@ func CommonBuildOptionsFromFlagSet(flags *pflag.FlagSet, findFlagFunc func(name 
 		DNSSearch:     dnsSearch,
 		DNSServers:    dnsServers,
 		HTTPProxy:     httpProxy,
-		IdentityLabel: types.NewOptionalBool(identityLabel),
+		IdentityLabel: identityLabel,
 		Memory:        memoryLimit,
 		MemorySwap:    memorySwap,
 		NoHostname:    noHostname,
@@ -198,6 +226,18 @@ func CommonBuildOptionsFromFlagSet(flags *pflag.FlagSet, findFlagFunc func(name 
 		OCIHooksDir:   ociHooks,
 	}
 	securityOpts, _ := flags.GetStringArray("security-opt")
+	defConfig, err := config.Default()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get container config: %w", err)
+	}
+	if defConfig.Containers.EnableLabeledUsers {
+		defSecurityOpts, err := currentLabelOpts()
+		if err != nil {
+			return nil, err
+		}
+
+		securityOpts = append(defSecurityOpts, securityOpts...)
+	}
 	if err := parseSecurityOpts(securityOpts, commonOpts); err != nil {
 		return nil, err
 	}
@@ -247,10 +287,21 @@ func parseSecurityOpts(securityOpts []string, commonOpts *define.CommonBuildOpti
 			commonOpts.ApparmorProfile = con[1]
 		case "seccomp":
 			commonOpts.SeccompProfilePath = con[1]
+		case "mask":
+			commonOpts.Masks = append(commonOpts.Masks, strings.Split(con[1], ":")...)
+		case "unmask":
+			unmasks := strings.Split(con[1], ":")
+			for _, unmask := range unmasks {
+				matches, _ := filepath.Glob(unmask)
+				if len(matches) > 0 {
+					commonOpts.Unmasks = append(commonOpts.Unmasks, matches...)
+					continue
+				}
+				commonOpts.Unmasks = append(commonOpts.Unmasks, unmask)
+			}
 		default:
 			return fmt.Errorf("invalid --security-opt 2: %q", opt)
 		}
-
 	}
 
 	if commonOpts.SeccompProfilePath == "" {
@@ -319,6 +370,9 @@ func validateExtraHost(val string) error {
 	if len(arr) != 2 || len(arr[0]) == 0 {
 		return fmt.Errorf("bad format for add-host: %q", val)
 	}
+	if arr[1] == etchosts.HostGateway {
+		return nil
+	}
 	if _, err := validateIPAddress(arr[1]); err != nil {
 		return fmt.Errorf("invalid IP address in add-host: %q", arr[1])
 	}
@@ -328,7 +382,7 @@ func validateExtraHost(val string) error {
 // validateIPAddress validates an Ip address.
 // for dns, ip, and ip6 flags also
 func validateIPAddress(val string) (string, error) {
-	var ip = net.ParseIP(strings.TrimSpace(val))
+	ip := net.ParseIP(strings.TrimSpace(val))
 	if ip != nil {
 		return ip.String(), nil
 	}
@@ -636,7 +690,9 @@ func AuthConfig(creds string) (*types.DockerAuthConfig, error) {
 	username, password := parseCreds(creds)
 	if username == "" {
 		fmt.Print("Username: ")
-		fmt.Scanln(&username)
+		if _, err := fmt.Scanln(&username); err != nil {
+			return nil, fmt.Errorf("reading user name: %w", err)
+		}
 	}
 	if password == "" {
 		fmt.Print("Password: ")
@@ -656,68 +712,67 @@ func AuthConfig(creds string) (*types.DockerAuthConfig, error) {
 // GetBuildOutput is responsible for parsing custom build output argument i.e `build --output` flag.
 // Takes `buildOutput` as string and returns BuildOutputOption
 func GetBuildOutput(buildOutput string) (define.BuildOutputOption, error) {
-	if len(buildOutput) == 1 && buildOutput == "-" {
+	if buildOutput == "-" {
 		// Feature parity with buildkit, output tar to stdout
 		// Read more here: https://docs.docker.com/engine/reference/commandline/build/#custom-build-outputs
-		return define.BuildOutputOption{Path: "",
+		return define.BuildOutputOption{
+			Path:     "",
 			IsDir:    false,
-			IsStdout: true}, nil
+			IsStdout: true,
+		}, nil
 	}
 	if !strings.Contains(buildOutput, ",") {
 		// expect default --output <dirname>
-		return define.BuildOutputOption{Path: buildOutput,
+		return define.BuildOutputOption{
+			Path:     buildOutput,
 			IsDir:    true,
-			IsStdout: false}, nil
+			IsStdout: false,
+		}, nil
 	}
 	isDir := true
 	isStdout := false
-	typeSelected := false
-	pathSelected := false
-	path := ""
-	tokens := strings.Split(buildOutput, ",")
-	for _, option := range tokens {
-		arr := strings.SplitN(option, "=", 2)
-		if len(arr) != 2 {
+	typeSelected := ""
+	pathSelected := ""
+	for _, option := range strings.Split(buildOutput, ",") {
+		key, value, found := strings.Cut(option, "=")
+		if !found {
 			return define.BuildOutputOption{}, fmt.Errorf("invalid build output options %q, expected format key=value", buildOutput)
 		}
-		switch arr[0] {
+		switch key {
 		case "type":
-			if typeSelected {
-				return define.BuildOutputOption{}, fmt.Errorf("duplicate %q not supported", arr[0])
+			if typeSelected != "" {
+				return define.BuildOutputOption{}, fmt.Errorf("duplicate %q not supported", key)
 			}
-			typeSelected = true
-			if arr[1] == "local" {
+			typeSelected = value
+			switch typeSelected {
+			case "local":
 				isDir = true
-			} else if arr[1] == "tar" {
+			case "tar":
 				isDir = false
-			} else {
-				return define.BuildOutputOption{}, fmt.Errorf("invalid type %q selected for build output options %q", arr[1], buildOutput)
+			default:
+				return define.BuildOutputOption{}, fmt.Errorf("invalid type %q selected for build output options %q", value, buildOutput)
 			}
 		case "dest":
-			if pathSelected {
-				return define.BuildOutputOption{}, fmt.Errorf("duplicate %q not supported", arr[0])
+			if pathSelected != "" {
+				return define.BuildOutputOption{}, fmt.Errorf("duplicate %q not supported", key)
 			}
-			pathSelected = true
-			path = arr[1]
+			pathSelected = value
 		default:
-			return define.BuildOutputOption{}, fmt.Errorf("unrecognized key %q in build output option: %q", arr[0], buildOutput)
+			return define.BuildOutputOption{}, fmt.Errorf("unrecognized key %q in build output option: %q", key, buildOutput)
 		}
 	}
 
-	if !typeSelected || !pathSelected {
-		return define.BuildOutputOption{}, fmt.Errorf("invalid build output option %q, accepted keys are type and dest must be present", buildOutput)
+	if typeSelected == "" || pathSelected == "" {
+		return define.BuildOutputOption{}, fmt.Errorf(`invalid build output option %q, accepted keys are "type" and "dest" must be present`, buildOutput)
 	}
 
-	if path == "-" {
+	if pathSelected == "-" {
 		if isDir {
-			return define.BuildOutputOption{}, fmt.Errorf("invalid build output option %q, type=local and dest=- is not supported", buildOutput)
+			return define.BuildOutputOption{}, fmt.Errorf(`invalid build output option %q, "type=local" can not be used with "dest=-"`, buildOutput)
 		}
-		return define.BuildOutputOption{Path: "",
-			IsDir:    false,
-			IsStdout: true}, nil
 	}
 
-	return define.BuildOutputOption{Path: path, IsDir: isDir, IsStdout: isStdout}, nil
+	return define.BuildOutputOption{Path: pathSelected, IsDir: isDir, IsStdout: isStdout}, nil
 }
 
 // TeeType parses a string value and returns a TeeType
@@ -750,7 +805,7 @@ func GetConfidentialWorkloadOptions(arg string) (define.ConfidentialWorkloadOpti
 			if options.AttestationURL == option {
 				options.AttestationURL = strings.TrimPrefix(option, "attestation-url=")
 			}
-		case strings.HasPrefix(option, "passphrase="), strings.HasPrefix(option, "passphrase="):
+		case strings.HasPrefix(option, "passphrase="):
 			options.Convert = true
 			options.DiskEncryptionPassphrase = strings.TrimPrefix(option, "passphrase=")
 		case strings.HasPrefix(option, "workload_id="), strings.HasPrefix(option, "workload-id="):
@@ -801,7 +856,7 @@ func SBOMScanOptions(c *cobra.Command) (*define.SBOMScanOptions, error) {
 }
 
 // SBOMScanOptionsFromFlagSet parses scan settings from the cli
-func SBOMScanOptionsFromFlagSet(flags *pflag.FlagSet, findFlagFunc func(name string) *pflag.Flag) (*define.SBOMScanOptions, error) {
+func SBOMScanOptionsFromFlagSet(flags *pflag.FlagSet, _ func(name string) *pflag.Flag) (*define.SBOMScanOptions, error) {
 	preset, err := flags.GetString("sbom")
 	if err != nil {
 		return nil, fmt.Errorf("invalid value for --sbom: %w", err)
@@ -830,7 +885,7 @@ func SBOMScanOptionsFromFlagSet(flags *pflag.FlagSet, findFlagFunc func(name str
 	if image != "" || len(commands) > 0 || mergeStrategy != "" {
 		options = &define.SBOMScanOptions{
 			Image:         image,
-			Commands:      append([]string{}, commands...),
+			Commands:      slices.Clone(commands),
 			MergeStrategy: define.SBOMMergeStrategy(mergeStrategy),
 		}
 	}
@@ -866,7 +921,7 @@ func SBOMScanOptionsFromFlagSet(flags *pflag.FlagSet, findFlagFunc func(name str
 }
 
 // IDMappingOptions parses the build options related to user namespaces and ID mapping.
-func IDMappingOptions(c *cobra.Command, isolation define.Isolation) (usernsOptions define.NamespaceOptions, idmapOptions *define.IDMappingOptions, err error) {
+func IDMappingOptions(c *cobra.Command, _ define.Isolation) (usernsOptions define.NamespaceOptions, idmapOptions *define.IDMappingOptions, err error) {
 	return IDMappingOptionsFromFlagSet(c.Flags(), c.PersistentFlags(), c.Flag)
 }
 
@@ -1209,7 +1264,7 @@ func Device(device string) (string, string, string, error) {
 // isValidDeviceMode checks if the mode for device is valid or not.
 // isValid mode is a composition of r (read), w (write), and m (mknod).
 func isValidDeviceMode(mode string) bool {
-	var legalDeviceMode = map[rune]struct{}{
+	legalDeviceMode := map[rune]struct{}{
 		'r': {},
 		'w': {},
 		'm': {},
@@ -1233,7 +1288,6 @@ func GetTempDir() string {
 
 // Secrets parses the --secret flag
 func Secrets(secrets []string) (map[string]define.Secret, error) {
-	invalidSyntax := fmt.Errorf("incorrect secret flag format: should be --secret id=foo,src=bar[,env=ENV,type=file|env]")
 	parsed := make(map[string]define.Secret)
 	for _, secret := range secrets {
 		tokens := strings.Split(secret, ",")
@@ -1253,10 +1307,12 @@ func Secrets(secrets []string) (map[string]define.Secret, error) {
 					return nil, errors.New("invalid secret type, must be file or env")
 				}
 				typ = kv[1]
+			default:
+				return nil, errInvalidSecretSyntax
 			}
 		}
 		if id == "" {
-			return nil, invalidSyntax
+			return nil, errInvalidSecretSyntax
 		}
 		if src == "" {
 			src = id
@@ -1281,11 +1337,11 @@ func Secrets(secrets []string) (map[string]define.Secret, error) {
 			src = fullPath
 		}
 		newSecret := define.Secret{
+			ID:         id,
 			Source:     src,
 			SourceType: typ,
 		}
 		parsed[id] = newSecret
-
 	}
 	return parsed, nil
 }

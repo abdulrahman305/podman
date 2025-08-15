@@ -19,13 +19,16 @@ type initMachine struct {
 	  -m, --memory uint            Memory in MiB (default 2048)
 	      --now                    Start machine now
 	      --rootful                Whether this machine should prefer rootful container execution
+	      --playbook string        Run an ansible playbook after first boot
+	      --tls-verify             Require HTTPS and verify certificates when contacting registries
 	      --timezone string        Set timezone (default "local")
 	  -v, --volume stringArray     Volumes to mount, source:target
 	      --volume-driver string   Optional volume driver
-
 	*/
+	playbook           string
 	cpus               *uint
 	diskSize           *uint
+	swap               *uint
 	ignitionPath       string
 	username           string
 	image              string
@@ -35,6 +38,7 @@ type initMachine struct {
 	rootful            bool
 	volumes            []string
 	userModeNetworking bool
+	tlsVerify          *bool
 
 	cmd []string
 }
@@ -73,8 +77,17 @@ func (i *initMachine) buildCmd(m *machineTestBuilder) []string {
 	if i.rootful {
 		cmd = append(cmd, "--rootful")
 	}
+	if l := len(i.playbook); l > 0 {
+		cmd = append(cmd, "--playbook", i.playbook)
+	}
 	if i.userModeNetworking {
 		cmd = append(cmd, "--user-mode-networking")
+	}
+	if i.swap != nil {
+		cmd = append(cmd, "--swap", strconv.Itoa(int(*i.swap)))
+	}
+	if i.tlsVerify != nil {
+		cmd = append(cmd, "--tls-verify="+strconv.FormatBool(*i.tlsVerify))
 	}
 	name := m.name
 	cmd = append(cmd, name)
@@ -90,6 +103,11 @@ func (i *initMachine) buildCmd(m *machineTestBuilder) []string {
 			if strings.Contains(session.errorToString(), "VM does not exist") {
 				return
 			}
+
+			// FIXME:#24344 work-around for custom ignition removal
+			if strings.Contains(session.errorToString(), "failed to remove machines files: unable to find connection named") {
+				return
+			}
 		}
 		Expect(session).To(Exit(0))
 	})
@@ -102,12 +120,18 @@ func (i *initMachine) withCPUs(num uint) *initMachine {
 	i.cpus = &num
 	return i
 }
+
 func (i *initMachine) withDiskSize(size uint) *initMachine {
 	i.diskSize = &size
 	return i
 }
 
-func (i *initMachine) withIgnitionPath(path string) *initMachine { //nolint:unused
+func (i *initMachine) withSwap(size uint) *initMachine {
+	i.swap = &size
+	return i
+}
+
+func (i *initMachine) withIgnitionPath(path string) *initMachine {
 	i.ignitionPath = path
 	return i
 }
@@ -147,7 +171,17 @@ func (i *initMachine) withRootful(r bool) *initMachine {
 	return i
 }
 
-func (i *initMachine) withUserModeNetworking(r bool) *initMachine { //nolint:unused
+func (i *initMachine) withRunPlaybook(p string) *initMachine {
+	i.playbook = p
+	return i
+}
+
+func (i *initMachine) withTlsVerify(tlsVerify *bool) *initMachine {
+	i.tlsVerify = tlsVerify
+	return i
+}
+
+func (i *initMachine) withUserModeNetworking(r bool) *initMachine { //nolint:unused,nolintlint
 	i.userModeNetworking = r
 	return i
 }

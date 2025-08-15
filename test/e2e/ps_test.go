@@ -334,25 +334,38 @@ var _ = Describe("Podman ps", func() {
 		Expect(result.OutputToString()).To(Equal(""))
 	})
 
+	It("podman ps ancestor filter with substring matching (Docker compatibility)", func() {
+		// Create a container to test with
+		_, ec, cid := podmanTest.RunLsContainer("test1")
+		Expect(ec).To(Equal(0))
+
+		// Get the full image ID to test substring matching
+		inspect := podmanTest.PodmanExitCleanly("inspect", cid, "--format", "{{.Image}}")
+		fullImageID := inspect.OutputToString()
+
+		// Test with prefix substring of image ID (Docker compatibility, new functionality)
+		imageIDPrefix := fullImageID[:12]
+		result := podmanTest.PodmanExitCleanly("ps", "-q", "--no-trunc", "-a", "--filter", "ancestor="+imageIDPrefix)
+		Expect(result.OutputToString()).To(Equal(cid))
+
+		// Test with non-prefix substring of image ID (Docker compatibility)
+		imageIDSubstr := fullImageID[4:16]
+		result = podmanTest.PodmanExitCleanly("ps", "-q", "--no-trunc", "-a", "--filter", "ancestor="+imageIDSubstr)
+		Expect(result.OutputToString()).To(Equal(cid))
+
+		// Test with non-existent substring (should not match)
+		result = podmanTest.PodmanExitCleanly("ps", "-q", "--no-trunc", "-a", "--filter", "ancestor=nonexistent")
+		Expect(result.OutputToString()).To(Equal(""))
+	})
+
 	It("podman ps id filter flag", func() {
 		_, ec, fullCid := podmanTest.RunLsContainer("")
 		Expect(ec).To(Equal(0))
 
-		result := podmanTest.Podman([]string{"ps", "-a", "--filter", fmt.Sprintf("id=%s", fullCid)})
+		result := podmanTest.Podman([]string{"ps", "-aq", "--no-trunc", "--filter", fmt.Sprintf("id=%s", fullCid)})
 		result.WaitWithDefaultTimeout()
 		Expect(result).Should(ExitCleanly())
-	})
-
-	It("podman ps id filter flag", func() {
-		session := podmanTest.RunTopContainer("")
-		session.WaitWithDefaultTimeout()
-		Expect(session).Should(ExitCleanly())
-		fullCid := session.OutputToString()
-
-		result := podmanTest.Podman([]string{"ps", "-aq", "--no-trunc", "--filter", "status=running"})
-		result.WaitWithDefaultTimeout()
-		Expect(result).Should(ExitCleanly())
-		Expect(result.OutputToStringArray()[0]).To(Equal(fullCid))
+		Expect(result.OutputToString()).To(Equal(fullCid))
 	})
 
 	It("podman ps multiple filters", func() {
@@ -403,6 +416,37 @@ var _ = Describe("Podman ps", func() {
 		actual := psFilter.OutputToString()
 		Expect(actual).ToNot(ContainSubstring(ctrName))
 		Expect(actual).ToNot(ContainSubstring("NAMES"))
+	})
+
+	// This test checks a ps filtering by container command/entrypoint
+	// To improve the test reliability a container ID is also checked
+	It("podman ps filter by container command", func() {
+		matchedSession := podmanTest.Podman([]string{"run", "-d", "--name", "matched", ALPINE, "top"})
+		matchedSession.WaitWithDefaultTimeout()
+		containedID := matchedSession.OutputToString() // save container ID returned by the run command
+		Expect(containedID).ShouldNot(BeEmpty())
+		Expect(matchedSession).Should(ExitCleanly())
+
+		matchedSession = podmanTest.Podman([]string{"ps", "-a", "--no-trunc", "--noheading", "--filter", "command=top"})
+		matchedSession.WaitWithDefaultTimeout()
+		Expect(matchedSession).Should(ExitCleanly())
+
+		output := matchedSession.OutputToStringArray()
+		Expect(output).To(HaveLen(1))
+		Expect(output).Should(ContainElement(ContainSubstring(containedID)))
+
+		unmatchedSession := podmanTest.Podman([]string{"run", "-d", "--name", "unmatched", ALPINE, "sh"})
+		unmatchedSession.WaitWithDefaultTimeout()
+		containedID = unmatchedSession.OutputToString() // save container ID returned by the run command
+		Expect(containedID).ShouldNot(BeEmpty())
+		Expect(unmatchedSession).Should(ExitCleanly())
+
+		unmatchedSession = podmanTest.Podman([]string{"ps", "-a", "--no-trunc", "--noheading", "--filter", "command=fakecommand"})
+		unmatchedSession.WaitWithDefaultTimeout()
+		Expect(unmatchedSession).Should(ExitCleanly())
+
+		output = unmatchedSession.OutputToStringArray()
+		Expect(output).To(BeEmpty())
 	})
 
 	It("podman ps mutually exclusive flags", func() {
@@ -894,6 +938,113 @@ var _ = Describe("Podman ps", func() {
 		Expect(session).Should(ExitCleanly())
 		// the output is not deterministic so check both possible orders
 		Expect(session.OutputToString()).To(Or(Equal(net1+","+net2), Equal(net2+","+net1)))
+	})
+
+	// This test checks ps filtering of external container by container command/entrypoint
+	It("podman ps filter external by container command", func() {
+		create := podmanTest.Podman([]string{"create", "--name", "test", BB})
+		create.WaitWithDefaultTimeout()
+		Expect(create).Should(ExitCleanly())
+
+		// Container should exist
+		Expect(podmanTest.NumberOfContainers()).To(Equal(1))
+
+		session := podmanTest.Podman([]string{"ps", "-a", "--external", "--no-trunc", "--noheading", "--filter", "command=sh"})
+		session.WaitWithDefaultTimeout()
+		Expect(session).Should(ExitCleanly())
+
+		output := session.OutputToStringArray()
+		Expect(output).To(HaveLen(1))
+	})
+
+	// This test checks ps filtering of external container by container name
+	It("podman ps filter external by container name", func() {
+		create := podmanTest.Podman([]string{"create", "--name", "test", BB})
+		create.WaitWithDefaultTimeout()
+		Expect(create).Should(ExitCleanly())
+
+		// Container should exist
+		Expect(podmanTest.NumberOfContainers()).To(Equal(1))
+
+		session := podmanTest.Podman([]string{"ps", "-a", "--external", "--no-trunc", "--noheading", "--filter", "name=test"})
+		session.WaitWithDefaultTimeout()
+		Expect(session).Should(ExitCleanly())
+
+		output := session.OutputToStringArray()
+		Expect(output).To(HaveLen(1))
+
+	})
+
+	// This test checks ps filtering of external container by container id
+	It("podman ps filter external by container id", func() {
+		create := podmanTest.Podman([]string{"create", "--name", "test", BB})
+		create.WaitWithDefaultTimeout()
+		Expect(create).Should(ExitCleanly())
+
+		// Container should exist
+		Expect(podmanTest.NumberOfContainers()).To(Equal(1))
+
+		session := podmanTest.Podman([]string{"ps", "-a", "--external", "--no-trunc", "--noheading", "--filter", "id=" + create.OutputToString()})
+		session.WaitWithDefaultTimeout()
+		Expect(session).Should(ExitCleanly())
+
+		output := session.OutputToStringArray()
+		Expect(output).To(HaveLen(1))
+	})
+
+	// This test checks ps filtering of external container by container label
+	It("podman ps filter external by container ancestor", func() {
+		create := podmanTest.Podman([]string{"create", "--name", "test", BB})
+		create.WaitWithDefaultTimeout()
+		Expect(create).Should(ExitCleanly())
+
+		// Container should exist
+		Expect(podmanTest.NumberOfContainers()).To(Equal(1))
+
+		session := podmanTest.Podman([]string{"ps", "-a", "--external", "--no-trunc", "--noheading", "--filter", "ancestor=" + BB})
+		session.WaitWithDefaultTimeout()
+		Expect(session).Should(ExitCleanly())
+
+		output := session.OutputToStringArray()
+		Expect(output).To(HaveLen(1))
+	})
+
+	// This test checks ps filtering of external container created earlier than a given
+	It("podman ps filter external by container created earlier than a given", func() {
+		early := podmanTest.Podman([]string{"create", "--name", "early", BB})
+		early.WaitWithDefaultTimeout()
+		Expect(early).Should(ExitCleanly())
+
+		late := podmanTest.Podman([]string{"create", "--name", "late", BB})
+		late.WaitWithDefaultTimeout()
+		Expect(late).Should(ExitCleanly())
+
+		session := podmanTest.Podman([]string{"ps", "-a", "--external", "--no-trunc", "--noheading", "--filter", "before=late"})
+		session.WaitWithDefaultTimeout()
+		Expect(session).Should(ExitCleanly())
+
+		output := session.OutputToStringArray()
+		Expect(output).To(HaveLen(1))
+		Expect(output).Should(ContainElement(ContainSubstring("early")))
+	})
+
+	// This test checks ps filtering of external container created since a given
+	It("podman ps filter external by container created since a given", func() {
+		early := podmanTest.Podman([]string{"create", "--name", "early", BB})
+		early.WaitWithDefaultTimeout()
+		Expect(early).Should(ExitCleanly())
+
+		late := podmanTest.Podman([]string{"create", "--name", "late", BB})
+		late.WaitWithDefaultTimeout()
+		Expect(late).Should(ExitCleanly())
+
+		session := podmanTest.Podman([]string{"ps", "-a", "--external", "--no-trunc", "--noheading", "--filter", "since=early"})
+		session.WaitWithDefaultTimeout()
+		Expect(session).Should(ExitCleanly())
+
+		output := session.OutputToStringArray()
+		Expect(output).To(HaveLen(1))
+		Expect(output).Should(ContainElement(ContainSubstring("late")))
 	})
 
 })

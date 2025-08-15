@@ -4,6 +4,7 @@ package integration
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -317,6 +318,8 @@ var _ = Describe("Podman pull", func() {
 		Expect(session).Should(ExitCleanly())
 	})
 
+	pullChunkedTests()
+
 	It("podman pull from docker-archive", func() {
 		SkipIfRemote("podman-remote does not support pulling from docker-archive")
 
@@ -623,7 +626,8 @@ var _ = Describe("Podman pull", func() {
 			// Pulling encrypted image without key should fail
 			session = podmanTest.Podman([]string{"pull", "--tls-verify=false", imgPath})
 			session.WaitWithDefaultTimeout()
-			Expect(session).Should(ExitWithError(125, "invalid tar header"))
+			Expect(session).Should(ExitWithError(125, " ")) // " ", not "" - stderr can be not empty, and we will match actual contents below.
+			Expect(session.ErrorToString()).To(Or(ContainSubstring("invalid tar header"), ContainSubstring("does not match config's DiffID")))
 
 			// Pulling encrypted image with wrong key should fail
 			session = podmanTest.Podman([]string{"pull", "-q", "--decryption-key", wrongPrivateKeyFileName, "--tls-verify=false", imgPath})
@@ -664,13 +668,33 @@ var _ = Describe("Podman pull", func() {
 
 			podmanTest.AddImageToRWStore(ALPINE)
 
+			success := false
+			registryArgs := []string{"run", "-d", "--name", "registry", "-p", "5012:5000"}
 			if isRootless() {
 				err := podmanTest.RestoreArtifact(REGISTRY_IMAGE)
 				Expect(err).ToNot(HaveOccurred())
+
+				// Debug code for https://github.com/containers/podman/issues/24219
+				logFile := filepath.Join(podmanTest.TempDir, "pasta.log")
+				registryArgs = append(registryArgs, "--network", "pasta:--trace,--log-file,"+logFile)
+				defer func() {
+					if success {
+						// only print the log on errors otherwise it will clutter CI logs way to much
+						return
+					}
+
+					f, err := os.Open(logFile)
+					Expect(err).ToNot(HaveOccurred())
+					defer f.Close()
+					GinkgoWriter.Println("pasta trace log:")
+					_, err = io.Copy(GinkgoWriter, f)
+					Expect(err).ToNot(HaveOccurred())
+				}()
 			}
+			registryArgs = append(registryArgs, REGISTRY_IMAGE, "/entrypoint.sh", "/etc/docker/registry/config.yml")
 			lock := GetPortLock("5012")
 			defer lock.Unlock()
-			session := podmanTest.Podman([]string{"run", "-d", "--name", "registry", "-p", "5012:5000", REGISTRY_IMAGE, "/entrypoint.sh", "/etc/docker/registry/config.yml"})
+			session := podmanTest.Podman(registryArgs)
 			session.WaitWithDefaultTimeout()
 			Expect(session).Should(ExitCleanly())
 
@@ -683,6 +707,8 @@ var _ = Describe("Podman pull", func() {
 			session = decryptionTestHelper(imgPath)
 
 			Expect(session.LineInOutputContainsTag(imgPath, "latest")).To(BeTrue())
+
+			success = true
 		})
 	})
 

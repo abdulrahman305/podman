@@ -4,9 +4,11 @@ package integration
 
 import (
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"syscall"
@@ -82,6 +84,24 @@ var _ = Describe("Podman run", func() {
 		session.WaitWithDefaultTimeout()
 		Expect(session).Should(ExitCleanly())
 		Expect(session.OutputToString()).To(ContainSubstring("graphRootMounted=1"))
+	})
+
+	It("podman run does not fail if --config points to non-existent", func() {
+		// Here we expect no failure. We have some existing code that will create the folder
+		// when it detects that the folder is missing.
+		nonExistentPath := "/tmp/def_does_not_exist"
+		session := podmanTest.Podman([]string{"--config", nonExistentPath, "run", ALPINE, "ls"})
+		session.WaitWithDefaultTimeout()
+		Expect(session).Should(ExitCleanly())
+	})
+
+	It("podman run fails if --config points to regular file", func() {
+		tempFile, err := os.CreateTemp(podmanTest.TempDir, "")
+		Expect(err).ToNot(HaveOccurred())
+		tempFileName := tempFile.Name()
+		session := podmanTest.Podman([]string{"--config", tempFileName, "run", ALPINE, "ls"})
+		session.WaitWithDefaultTimeout()
+		Expect(session).Should(ExitWithError(1, fmt.Sprintf(`Supplied --config file (%s) is not a directory`, tempFileName)))
 	})
 
 	It("podman run from manifest list", func() {
@@ -321,6 +341,13 @@ var _ = Describe("Podman run", func() {
 		osession.WaitWithDefaultTimeout()
 		Expect(osession).Should(ExitCleanly())
 		Expect(osession.OutputToString()).To(Equal("0 1234 5678"))
+
+		// Test --rootfs with an external overlay with --userns=auto
+		osession = podmanTest.Podman([]string{"run", "--userns=auto", "--rm", "--security-opt", "label=disable",
+			"--rootfs", rootfs + ":O", "cat", "/proc/self/uid_map"})
+		osession.WaitWithDefaultTimeout()
+		Expect(osession).Should(ExitCleanly())
+		Expect(osession.OutputToString()).To(ContainSubstring("1024"))
 	})
 
 	It("podman run a container with --init", func() {
@@ -374,7 +401,7 @@ var _ = Describe("Podman run", func() {
 		session := podmanTest.Podman([]string{"run", "-d", "--name=maskCtr", ALPINE, "sleep", "200"})
 		session.WaitWithDefaultTimeout()
 		Expect(session).Should(ExitCleanly())
-		for _, mask := range config.DefaultMaskedPaths {
+		for _, mask := range config.DefaultMaskedPaths() {
 			if st, err := os.Stat(mask); err == nil {
 				if st.IsDir() {
 					session = podmanTest.Podman([]string{"exec", "maskCtr", "ls", mask})
@@ -411,7 +438,7 @@ var _ = Describe("Podman run", func() {
 		session.WaitWithDefaultTimeout()
 		Expect(session.OutputToString()).To(BeEmpty())
 
-		session = podmanTest.Podman([]string{"run", "-d", "--name=maskCtr2", "--security-opt", "unmask=/proc/acpi:/sys/firmware", ALPINE, "sleep", "200"})
+		session = podmanTest.Podman([]string{"run", "-d", "--name=maskCtr2", "--security-opt", "unmask=/proc/acpi:/sys/firmware:/sys/fs/cgroup", ALPINE, "sleep", "200"})
 		session.WaitWithDefaultTimeout()
 		Expect(session).Should(ExitCleanly())
 		session = podmanTest.Podman([]string{"exec", "maskCtr2", "ls", "/sys/firmware"})
@@ -421,6 +448,9 @@ var _ = Describe("Podman run", func() {
 		session = podmanTest.Podman([]string{"exec", "maskCtr2", "ls", "/proc/acpi"})
 		session.WaitWithDefaultTimeout()
 		Expect(session.OutputToString()).To(Not(BeEmpty()))
+		Expect(session).Should(ExitCleanly())
+		session = podmanTest.Podman([]string{"exec", "maskCtr2", "sh", "-c", "awk '$5 ~ /\\/sys\\/fs\\/cgroup/ && $6 ~ /^rw,|,rw,|,rw$|^rw$/ { print }' /proc/self/mountinfo | grep ."})
+		session.WaitWithDefaultTimeout()
 		Expect(session).Should(ExitCleanly())
 
 		session = podmanTest.Podman([]string{"run", "-d", "--name=maskCtr3", "--security-opt", "mask=/sys/power/disk", ALPINE, "sleep", "200"})
@@ -822,13 +852,14 @@ USER bin`, BB)
 
 	It("podman run device-read-bps test", func() {
 		SkipIfRootless("Setting device-read-bps not supported for rootless users")
+		skipWithoutDevNullb0()
 
 		var session *PodmanSessionIntegration
 
 		if CGROUPSV2 {
-			session = podmanTest.Podman([]string{"run", "--rm", "--device-read-bps=/dev/zero:1mb", ALPINE, "sh", "-c", "cat /sys/fs/cgroup/$(sed -e 's|0::||' < /proc/self/cgroup)/io.max"})
+			session = podmanTest.Podman([]string{"run", "--rm", "--device-read-bps=/dev/nullb0:1mb", ALPINE, "sh", "-c", "cat /sys/fs/cgroup/$(sed -e 's|0::||' < /proc/self/cgroup)/io.max"})
 		} else {
-			session = podmanTest.Podman([]string{"run", "--rm", "--device-read-bps=/dev/zero:1mb", ALPINE, "cat", "/sys/fs/cgroup/blkio/blkio.throttle.read_bps_device"})
+			session = podmanTest.Podman([]string{"run", "--rm", "--device-read-bps=/dev/nullb0:1mb", ALPINE, "cat", "/sys/fs/cgroup/blkio/blkio.throttle.read_bps_device"})
 		}
 
 		session.WaitWithDefaultTimeout()
@@ -840,13 +871,14 @@ USER bin`, BB)
 
 	It("podman run device-write-bps test", func() {
 		SkipIfRootless("Setting device-write-bps not supported for rootless users")
+		skipWithoutDevNullb0()
 
 		var session *PodmanSessionIntegration
 
 		if CGROUPSV2 {
-			session = podmanTest.Podman([]string{"run", "--rm", "--device-write-bps=/dev/zero:1mb", ALPINE, "sh", "-c", "cat /sys/fs/cgroup/$(sed -e 's|0::||' < /proc/self/cgroup)/io.max"})
+			session = podmanTest.Podman([]string{"run", "--rm", "--device-write-bps=/dev/nullb0:1mb", ALPINE, "sh", "-c", "cat /sys/fs/cgroup/$(sed -e 's|0::||' < /proc/self/cgroup)/io.max"})
 		} else {
-			session = podmanTest.Podman([]string{"run", "--rm", "--device-write-bps=/dev/zero:1mb", ALPINE, "cat", "/sys/fs/cgroup/blkio/blkio.throttle.write_bps_device"})
+			session = podmanTest.Podman([]string{"run", "--rm", "--device-write-bps=/dev/nullb0:1mb", ALPINE, "cat", "/sys/fs/cgroup/blkio/blkio.throttle.write_bps_device"})
 		}
 		session.WaitWithDefaultTimeout()
 		Expect(session).Should(ExitCleanly())
@@ -857,12 +889,14 @@ USER bin`, BB)
 
 	It("podman run device-read-iops test", func() {
 		SkipIfRootless("Setting device-read-iops not supported for rootless users")
+		skipWithoutDevNullb0()
+
 		var session *PodmanSessionIntegration
 
 		if CGROUPSV2 {
-			session = podmanTest.Podman([]string{"run", "--rm", "--device-read-iops=/dev/zero:100", ALPINE, "sh", "-c", "cat /sys/fs/cgroup/$(sed -e 's|0::||' < /proc/self/cgroup)/io.max"})
+			session = podmanTest.Podman([]string{"run", "--rm", "--device-read-iops=/dev/nullb0:100", ALPINE, "sh", "-c", "cat /sys/fs/cgroup/$(sed -e 's|0::||' < /proc/self/cgroup)/io.max"})
 		} else {
-			session = podmanTest.Podman([]string{"run", "--rm", "--device-read-iops=/dev/zero:100", ALPINE, "cat", "/sys/fs/cgroup/blkio/blkio.throttle.read_iops_device"})
+			session = podmanTest.Podman([]string{"run", "--rm", "--device-read-iops=/dev/nullb0:100", ALPINE, "cat", "/sys/fs/cgroup/blkio/blkio.throttle.read_iops_device"})
 		}
 
 		session.WaitWithDefaultTimeout()
@@ -874,12 +908,14 @@ USER bin`, BB)
 
 	It("podman run device-write-iops test", func() {
 		SkipIfRootless("Setting device-write-iops not supported for rootless users")
+		skipWithoutDevNullb0()
+
 		var session *PodmanSessionIntegration
 
 		if CGROUPSV2 {
-			session = podmanTest.Podman([]string{"run", "--rm", "--device-write-iops=/dev/zero:100", ALPINE, "sh", "-c", "cat /sys/fs/cgroup/$(sed -e 's|0::||' < /proc/self/cgroup)/io.max"})
+			session = podmanTest.Podman([]string{"run", "--rm", "--device-write-iops=/dev/nullb0:100", ALPINE, "sh", "-c", "cat /sys/fs/cgroup/$(sed -e 's|0::||' < /proc/self/cgroup)/io.max"})
 		} else {
-			session = podmanTest.Podman([]string{"run", "--rm", "--device-write-iops=/dev/zero:100", ALPINE, "cat", "/sys/fs/cgroup/blkio/blkio.throttle.write_iops_device"})
+			session = podmanTest.Podman([]string{"run", "--rm", "--device-write-iops=/dev/nullb0:100", ALPINE, "cat", "/sys/fs/cgroup/blkio/blkio.throttle.write_iops_device"})
 		}
 
 		session.WaitWithDefaultTimeout()
@@ -1033,21 +1069,6 @@ echo -n madeit-$teststring >$tmpfile
 		Expect(session.OutputToString()).To(ContainSubstring("key.pem"))
 	})
 
-	It("podman run with FIPS mode secrets", func() {
-		SkipIfRootless("rootless can not manipulate system-fips file")
-		fipsFile := "/etc/system-fips"
-		err = os.WriteFile(fipsFile, []byte{}, 0755)
-		Expect(err).ToNot(HaveOccurred())
-
-		session := podmanTest.Podman([]string{"run", "--rm", ALPINE, "ls", "/run/secrets"})
-		session.WaitWithDefaultTimeout()
-		Expect(session).Should(ExitCleanly())
-		Expect(session.OutputToString()).To(ContainSubstring("system-fips"))
-
-		err = os.Remove(fipsFile)
-		Expect(err).ToNot(HaveOccurred())
-	})
-
 	It("podman run without group-add", func() {
 		session := podmanTest.Podman([]string{"run", "--rm", ALPINE, "id"})
 		session.WaitWithDefaultTimeout()
@@ -1147,12 +1168,6 @@ echo -n madeit-$teststring >$tmpfile
 		session := podmanTest.Podman([]string{"run", "--rm", "--attach", "asdfasdf", ALPINE, "ls", "/"})
 		session.WaitWithDefaultTimeout()
 		Expect(session).Should(ExitWithError(125, `invalid stream "asdfasdf" for --attach - must be one of stdin, stdout, or stderr: invalid argument`))
-	})
-
-	It("podman run exit code on failure to exec", func() {
-		session := podmanTest.Podman([]string{"run", ALPINE, "/etc"})
-		session.WaitWithDefaultTimeout()
-		Expect(session).Should(ExitWithError(126, "open executable: Operation not permitted: OCI permission denied"))
 	})
 
 	It("podman run error on exec", func() {
@@ -1420,6 +1435,13 @@ VOLUME %s`, ALPINE, volPath, volPath)
 		Expect(session.OutputToString()).To(ContainSubstring("1001-123"))
 	})
 
+	It("podman run --mount type=devpts,target=/dev/pts with ptmxmode", func() {
+		session := podmanTest.Podman([]string{"run", "--mount", "type=devpts,target=/dev/pts,ptmxmode=0444", fedoraMinimal, "findmnt", "-noOPTIONS", "/dev/pts"})
+		session.WaitWithDefaultTimeout()
+		Expect(session).Should(ExitCleanly())
+		Expect(session.OutputToString()).To(ContainSubstring("ptmxmode=444"))
+	})
+
 	It("podman run --pod automatically", func() {
 		session := podmanTest.Podman([]string{"run", "-d", "--pod", "new:foobar", ALPINE, "nc", "-l", "-p", "8686"})
 		session.WaitWithDefaultTimeout()
@@ -1452,6 +1474,27 @@ VOLUME %s`, ALPINE, volPath, volPath)
 
 		numContainers := podmanTest.NumberOfContainers()
 		Expect(numContainers).To(Equal(0))
+	})
+
+	It("podman run after infra-container rootfs removed", func() {
+		// Regression test for #26190
+		podmanTest.PodmanExitCleanly("run", "--name", "test", "--pod", "new:foobar", ALPINE, "ls")
+
+		podInspect := podmanTest.PodmanExitCleanly("pod", "inspect", "foobar", "--format", "{{.InfraContainerID}}")
+		infraID := podInspect.OutputToString()
+
+		infraInspect := podmanTest.PodmanExitCleanly("inspect", infraID, "--format", "{{.Rootfs}}")
+		rootfs := infraInspect.OutputToString()
+
+		podmanTest.PodmanExitCleanly("pod", "stop", "foobar")
+
+		_, statErr := os.Stat(rootfs)
+		Expect(statErr).ToNot(HaveOccurred())
+
+		err := os.RemoveAll(rootfs)
+		Expect(err).ToNot(HaveOccurred())
+
+		podmanTest.PodmanExitCleanly("run", "--replace", "--name", "test", "--pod", "foobar", ALPINE, "ls")
 	})
 
 	It("podman run --rm failed container should delete itself", func() {
@@ -1516,6 +1559,112 @@ VOLUME %s`, ALPINE, volPath, volPath)
 		session := podmanTest.Podman([]string{"run", "-dt", "--add-host", "test1:127.0.0.1", "--no-hosts", ALPINE, "top"})
 		session.WaitWithDefaultTimeout()
 		Expect(session).To(ExitWithError(125, "--no-hosts and --add-host cannot be set together"))
+	})
+
+	Describe("podman run with --hosts-file", func() {
+		BeforeEach(func() {
+			configHosts := filepath.Join(podmanTest.TempDir, "hosts")
+			err := os.WriteFile(configHosts, []byte("12.34.56.78 config.example.com"), 0755)
+			Expect(err).ToNot(HaveOccurred())
+
+			confFile := filepath.Join(podmanTest.TempDir, "containers.conf")
+			err = os.WriteFile(confFile, []byte(fmt.Sprintf("[containers]\nbase_hosts_file=\"%s\"\n", configHosts)), 0755)
+			Expect(err).ToNot(HaveOccurred())
+			os.Setenv("CONTAINERS_CONF_OVERRIDE", confFile)
+			if IsRemote() {
+				podmanTest.RestartRemoteService()
+			}
+
+			dockerfile := strings.Join([]string{
+				`FROM quay.io/libpod/alpine:latest`,
+				`RUN echo '56.78.12.34 image.example.com' > /etc/hosts`,
+			}, "\n")
+			podmanTest.BuildImage(dockerfile, "foobar.com/hosts_test:latest", "false", "--no-hosts")
+		})
+
+		It("--hosts-file=path", func() {
+			hostsPath := filepath.Join(podmanTest.TempDir, "hosts")
+			err := os.WriteFile(hostsPath, []byte("23.45.67.89 file.example.com"), 0755)
+			Expect(err).ToNot(HaveOccurred())
+
+			session := podmanTest.Podman([]string{"run", "--hostname", "hosts_test.dev", "--hosts-file=" + hostsPath, "--add-host=add.example.com:34.56.78.90", "--name", "hosts_test", "--rm", "foobar.com/hosts_test:latest", "cat", "/etc/hosts"})
+			session.WaitWithDefaultTimeout()
+			Expect(session).Should(ExitCleanly())
+			Expect(session.OutputToString()).ToNot(ContainSubstring("56.78.12.34 image.example.com"))
+			Expect(session.OutputToString()).ToNot(ContainSubstring("12.34.56.78 config.example.com"))
+			Expect(session.OutputToString()).To(ContainSubstring("23.45.67.89 file.example.com"))
+			Expect(session.OutputToString()).To(ContainSubstring("34.56.78.90 add.example.com"))
+			Expect(session.OutputToString()).To(ContainSubstring("127.0.0.1 localhost"))
+			Expect(session.OutputToString()).To(ContainSubstring("::1 localhost"))
+			Expect(session.OutputToString()).To(ContainSubstring("host.containers.internal host.docker.internal"))
+			Expect(session.OutputToString()).To(ContainSubstring("hosts_test.dev hosts_test"))
+		})
+
+		It("--hosts-file=image", func() {
+			session := podmanTest.Podman([]string{"run", "--hostname", "hosts_test.dev", "--hosts-file=image", "--add-host=add.example.com:34.56.78.90", "--name", "hosts_test", "--rm", "foobar.com/hosts_test:latest", "cat", "/etc/hosts"})
+			session.WaitWithDefaultTimeout()
+			Expect(session).Should(ExitCleanly())
+			Expect(session.OutputToString()).To(ContainSubstring("56.78.12.34 image.example.com"))
+			Expect(session.OutputToString()).ToNot(ContainSubstring("12.34.56.78 config.example.com"))
+			Expect(session.OutputToString()).To(ContainSubstring("34.56.78.90 add.example.com"))
+			Expect(session.OutputToString()).To(ContainSubstring("127.0.0.1 localhost"))
+			Expect(session.OutputToString()).To(ContainSubstring("::1 localhost"))
+			Expect(session.OutputToString()).To(ContainSubstring("host.containers.internal host.docker.internal"))
+			Expect(session.OutputToString()).To(ContainSubstring("hosts_test.dev hosts_test"))
+		})
+
+		It("--hosts-file=none", func() {
+			session := podmanTest.Podman([]string{"run", "--hostname", "hosts_test.dev", "--hosts-file=none", "--add-host=add.example.com:34.56.78.90", "--name", "hosts_test", "--rm", "foobar.com/hosts_test:latest", "cat", "/etc/hosts"})
+			session.WaitWithDefaultTimeout()
+			Expect(session).Should(ExitCleanly())
+			Expect(session.OutputToString()).ToNot(ContainSubstring("56.78.12.34 image.example.com"))
+			Expect(session.OutputToString()).ToNot(ContainSubstring("12.34.56.78 config.example.com"))
+			Expect(session.OutputToString()).To(ContainSubstring("34.56.78.90 add.example.com"))
+			Expect(session.OutputToString()).To(ContainSubstring("127.0.0.1 localhost"))
+			Expect(session.OutputToString()).To(ContainSubstring("::1 localhost"))
+			Expect(session.OutputToString()).To(ContainSubstring("host.containers.internal host.docker.internal"))
+			Expect(session.OutputToString()).To(ContainSubstring("hosts_test.dev hosts_test"))
+		})
+
+		It("--hosts-file= falls back to containers.conf", func() {
+			session := podmanTest.Podman([]string{"run", "--hostname", "hosts_test.dev", "--hosts-file=", "--add-host=add.example.com:34.56.78.90", "--name", "hosts_test", "--rm", "foobar.com/hosts_test:latest", "cat", "/etc/hosts"})
+			session.WaitWithDefaultTimeout()
+			Expect(session).Should(ExitCleanly())
+			Expect(session.OutputToString()).ToNot(ContainSubstring("56.78.12.34 image.example.com"))
+			Expect(session.OutputToString()).To(ContainSubstring("12.34.56.78 config.example.com"))
+			Expect(session.OutputToString()).To(ContainSubstring("34.56.78.90 add.example.com"))
+			Expect(session.OutputToString()).To(ContainSubstring("127.0.0.1 localhost"))
+			Expect(session.OutputToString()).To(ContainSubstring("::1 localhost"))
+			Expect(session.OutputToString()).To(ContainSubstring("host.containers.internal host.docker.internal"))
+			Expect(session.OutputToString()).To(ContainSubstring("hosts_test.dev hosts_test"))
+		})
+
+		It("works with pod without an infra-container", func() {
+			_, ec, _ := podmanTest.CreatePod(map[string][]string{"--name": {"hosts_test_pod"}})
+			Expect(ec).To(Equal(0))
+
+			session := podmanTest.Podman([]string{"run", "--pod", "hosts_test_pod", "--hostname", "hosts_test.dev", "--hosts-file=image", "--add-host=add.example.com:34.56.78.90", "--name", "hosts_test", "--rm", "foobar.com/hosts_test:latest", "cat", "/etc/hosts"})
+			session.WaitWithDefaultTimeout()
+			Expect(session).Should(ExitCleanly())
+			Expect(session.OutputToString()).To(ContainSubstring("56.78.12.34 image.example.com"))
+			Expect(session.OutputToString()).ToNot(ContainSubstring("12.34.56.78 config.example.com"))
+			Expect(session.OutputToString()).To(ContainSubstring("34.56.78.90 add.example.com"))
+			Expect(session.OutputToString()).To(ContainSubstring("127.0.0.1 localhost"))
+			Expect(session.OutputToString()).To(ContainSubstring("::1 localhost"))
+			Expect(session.OutputToString()).To(ContainSubstring("host.containers.internal host.docker.internal"))
+			Expect(session.OutputToString()).To(ContainSubstring("hosts_test.dev hosts_test"))
+		})
+
+		It("should fail with --no-hosts", func() {
+			hostsPath := filepath.Join(podmanTest.TempDir, "hosts")
+			err := os.WriteFile(hostsPath, []byte("23.45.67.89 file2.example.com"), 0755)
+			Expect(err).ToNot(HaveOccurred())
+
+			session := podmanTest.Podman([]string{"run", "--no-hosts", "--hosts-file=" + hostsPath, "--name", "hosts_test", "--rm", "foobar.com/hosts_test:latest", "cat", "/etc/hosts"})
+			session.WaitWithDefaultTimeout()
+			Expect(session).To(ExitWithError(125, "--no-hosts and --hosts-file cannot be set together"))
+		})
+
 	})
 
 	It("podman run with restart-policy always restarts containers", func() {
@@ -1605,7 +1754,13 @@ VOLUME %s`, ALPINE, volPath, volPath)
 			}
 		}
 
-		container := podmanTest.PodmanSystemdScope([]string{"run", "--rm", "--cgroups=split", ALPINE, "cat", "/proc/self/cgroup"})
+		scopeOptions := PodmanExecOptions{
+			Wrapper: []string{"systemd-run", "--scope"},
+		}
+		if isRootless() {
+			scopeOptions.Wrapper = append(scopeOptions.Wrapper, "--user")
+		}
+		container := podmanTest.PodmanWithOptions(scopeOptions, "run", "--rm", "--cgroups=split", ALPINE, "cat", "/proc/self/cgroup")
 		container.WaitWithDefaultTimeout()
 		Expect(container).Should(Exit(0))
 		checkLines(container.OutputToStringArray())
@@ -1614,7 +1769,7 @@ VOLUME %s`, ALPINE, volPath, volPath)
 			ContainSubstring("Running as unit: ")))      // systemd >= 255
 
 		// check that --cgroups=split is honored also when a container runs in a pod
-		container = podmanTest.PodmanSystemdScope([]string{"run", "--rm", "--pod", "new:split-test-pod", "--cgroups=split", ALPINE, "cat", "/proc/self/cgroup"})
+		container = podmanTest.PodmanWithOptions(scopeOptions, "run", "--rm", "--pod", "new:split-test-pod", "--cgroups=split", ALPINE, "cat", "/proc/self/cgroup")
 		container.WaitWithDefaultTimeout()
 		Expect(container).Should(Exit(0))
 		checkLines(container.OutputToStringArray())
@@ -1750,7 +1905,9 @@ VOLUME %s`, ALPINE, volPath, volPath)
 		files := []*os.File{
 			devNull,
 		}
-		session := podmanTest.PodmanExtraFiles([]string{"run", "--preserve-fds", "1", ALPINE, "ls"}, files)
+		session := podmanTest.PodmanWithOptions(PodmanExecOptions{
+			ExtraFiles: files,
+		}, "run", "--preserve-fds", "1", ALPINE, "ls")
 		session.WaitWithDefaultTimeout()
 		Expect(session).Should(ExitCleanly())
 	})
@@ -2134,6 +2291,19 @@ WORKDIR /madethis`, BB)
 		running.WaitWithDefaultTimeout()
 		Expect(running).Should(ExitCleanly())
 		Expect(running.OutputToStringArray()).To(HaveLen(2))
+
+		podmanTest.StopContainer("--all")
+
+		indirectName := "ctr3"
+		indirectContainer := podmanTest.Podman([]string{"create", "--name", indirectName, "--requires", mainName, ALPINE, "top"})
+		indirectContainer.WaitWithDefaultTimeout()
+		Expect(indirectContainer).Should(ExitCleanly())
+
+		for _, name := range []string{depName, indirectName} {
+			start := podmanTest.Podman([]string{"start", name})
+			start.WaitWithDefaultTimeout()
+			Expect(start).Should(ExitCleanly())
+		}
 	})
 
 	It("podman run with pidfile", func() {
@@ -2182,9 +2352,31 @@ WORKDIR /madethis`, BB)
 
 		podmanTest.AddImageToRWStore(ALPINE)
 
+		success := false
+		registryArgs := []string{"run", "-d", "--name", "registry", "-p", "5006:5000"}
+		if isRootless() {
+			// Debug code for https://github.com/containers/podman/issues/24219
+			logFile := filepath.Join(podmanTest.TempDir, "pasta.log")
+			registryArgs = append(registryArgs, "--network", "pasta:--trace,--log-file,"+logFile)
+			defer func() {
+				if success {
+					// only print the log on errors otherwise it will clutter CI logs way to much
+					return
+				}
+
+				f, err := os.Open(logFile)
+				Expect(err).ToNot(HaveOccurred())
+				defer f.Close()
+				GinkgoWriter.Println("pasta trace log:")
+				_, err = io.Copy(GinkgoWriter, f)
+				Expect(err).ToNot(HaveOccurred())
+			}()
+		}
+		registryArgs = append(registryArgs, REGISTRY_IMAGE, "/entrypoint.sh", "/etc/docker/registry/config.yml")
+
 		lock := GetPortLock("5006")
 		defer lock.Unlock()
-		session := podmanTest.Podman([]string{"run", "-d", "--name", "registry", "-p", "5006:5000", REGISTRY_IMAGE, "/entrypoint.sh", "/etc/docker/registry/config.yml"})
+		session := podmanTest.Podman(registryArgs)
 		session.WaitWithDefaultTimeout()
 		Expect(session).Should(ExitCleanly())
 
@@ -2211,13 +2403,15 @@ WORKDIR /madethis`, BB)
 		session = podmanTest.Podman([]string{"run", "--tls-verify=false", imgPath})
 		session.WaitWithDefaultTimeout()
 		Expect(session).Should(ExitWithError(125, "Trying to pull "+imgPath))
-		Expect(session.ErrorToString()).To(ContainSubstring("invalid tar header"))
+		Expect(session.ErrorToString()).To(Or(ContainSubstring("invalid tar header"), ContainSubstring("does not match config's DiffID")))
 
 		// With
 		session = podmanTest.Podman([]string{"run", "--tls-verify=false", "--decryption-key", privateKeyFileName, imgPath})
 		session.WaitWithDefaultTimeout()
 		Expect(session).Should(Exit(0))
 		Expect(session.ErrorToString()).To(ContainSubstring("Trying to pull " + imgPath))
+
+		success = true
 	})
 
 	It("podman run --shm-size-systemd", func() {
@@ -2262,5 +2456,85 @@ WORKDIR /madethis`, BB)
 		Expect(inspectData).To(HaveLen(1))
 		Expect(inspectData[0].Config.Annotations).To(Not(HaveKey(annoName)))
 		Expect(inspectData[0].Config.Annotations).To(Not(HaveKey("testlabel")))
+	})
+
+	It("podman run log-opt overrides containers.conf path", func() {
+		expectedMessage := "CLI override test message"
+		confLogPath := filepath.Join(podmanTest.TempDir, "conf-logs")
+
+		conffile := filepath.Join(podmanTest.TempDir, "containers.conf")
+		configContent := fmt.Sprintf(`[containers]
+log_driver = "k8s-file"
+log_path = "%s"
+`, confLogPath)
+
+		err := os.WriteFile(conffile, []byte(configContent), 0644)
+		Expect(err).ToNot(HaveOccurred())
+
+		err = os.MkdirAll(confLogPath, 0755)
+		Expect(err).ToNot(HaveOccurred())
+
+		os.Setenv("CONTAINERS_CONF_OVERRIDE", conffile)
+		defer os.Unsetenv("CONTAINERS_CONF_OVERRIDE")
+
+		if IsRemote() {
+			podmanTest.RestartRemoteService()
+		}
+
+		cliLogPath := filepath.Join(podmanTest.TempDir, "cli-override.log")
+		podmanTest.PodmanExitCleanly("run", "--rm", "--log-driver", "k8s-file", "--log-opt", fmt.Sprintf("path=%s", cliLogPath), ALPINE, "echo", expectedMessage)
+
+		confLogDirs, err := os.ReadDir(confLogPath)
+		Expect(err).ToNot(HaveOccurred(), "Should be able to read config log directory that we created")
+		Expect(confLogDirs).To(BeEmpty(), "Config file log path should not be used when CLI overrides")
+
+		content, err := os.ReadFile(cliLogPath)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(string(content)).To(ContainSubstring(expectedMessage))
+		Expect(string(content)).To(MatchRegexp(`\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+.*stdout F ` + regexp.QuoteMeta(expectedMessage)))
+
+		_ = os.Remove(cliLogPath)
+	})
+
+	It("podman run uses containers.conf log_path", func() {
+		expectedMessage := "Config file path test message"
+		confLogPath := filepath.Join(podmanTest.TempDir, "conf-logs")
+
+		conffile := filepath.Join(podmanTest.TempDir, "containers.conf")
+		configContent := fmt.Sprintf(`[containers]
+log_driver = "k8s-file"
+log_path = "%s"
+`, confLogPath)
+
+		err := os.WriteFile(conffile, []byte(configContent), 0644)
+		Expect(err).ToNot(HaveOccurred())
+
+		err = os.MkdirAll(confLogPath, 0755)
+		Expect(err).ToNot(HaveOccurred())
+
+		os.Setenv("CONTAINERS_CONF_OVERRIDE", conffile)
+		defer os.Unsetenv("CONTAINERS_CONF_OVERRIDE")
+
+		if IsRemote() {
+			podmanTest.RestartRemoteService()
+		}
+
+		containerName := "test-conf-log-container"
+
+		podmanTest.PodmanExitCleanly("run", "--name", containerName, ALPINE, "echo", expectedMessage)
+		session := podmanTest.PodmanExitCleanly("inspect", "--format", "{{.Id}}", containerName)
+
+		containerID := strings.TrimSpace(session.OutputToString())
+		logFilePath := filepath.Join(confLogPath, containerID, "ctr.log")
+
+		inspectSession := podmanTest.PodmanExitCleanly("inspect", "--format", "{{.HostConfig.LogConfig.Path}}", containerName)
+		inspectedPath := strings.TrimSpace(inspectSession.OutputToString())
+		Expect(inspectedPath).To(Equal(logFilePath), "Log path in inspect data should match the path from containers.conf")
+
+		content, err := os.ReadFile(logFilePath)
+		Expect(err).ToNot(HaveOccurred())
+
+		Expect(string(content)).To(ContainSubstring(expectedMessage), "Log should contain expected message")
+		Expect(string(content)).To(MatchRegexp(`\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+.*stdout F `+regexp.QuoteMeta(expectedMessage)), "Log should follow k8s-file format")
 	})
 })

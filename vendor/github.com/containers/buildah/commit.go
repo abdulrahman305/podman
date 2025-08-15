@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"strings"
 	"time"
@@ -24,14 +25,15 @@ import (
 	"github.com/containers/storage/pkg/archive"
 	"github.com/containers/storage/pkg/stringid"
 	digest "github.com/opencontainers/go-digest"
+	v1 "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/sirupsen/logrus"
-	"golang.org/x/exp/maps"
 )
 
 const (
-	// BuilderIdentityAnnotation is the name of the annotation key containing
-	// the name and version of the producer of the image stored as an
-	// annotation on commit.
+	// BuilderIdentityAnnotation is the name of the label which will be set
+	// to contain the name and version of the producer of the image at
+	// commit-time.  (N.B. yes, the constant's name includes "Annotation",
+	// but it's added as a label.)
 	BuilderIdentityAnnotation = "io.buildah.version"
 )
 
@@ -57,9 +59,20 @@ type CommitOptions struct {
 	// ReportWriter is an io.Writer which will be used to log the writing
 	// of the new image.
 	ReportWriter io.Writer
-	// HistoryTimestamp is the timestamp used when creating new items in the
-	// image's history.  If unset, the current time will be used.
+	// HistoryTimestamp specifies a timestamp to use for the image's
+	// created-on date, the corresponding field in new history entries, and
+	// the timestamps to set on contents in new layer diffs.  If left
+	// unset, the current time is used for the configuration and manifest,
+	// and timestamps of layer contents are used as-is.
 	HistoryTimestamp *time.Time
+	// SourceDateEpoch specifies a timestamp to use for the image's
+	// created-on date and the corresponding field in new history entries.
+	// If left unset, the current time is used for the configuration and
+	// manifest.
+	SourceDateEpoch *time.Time
+	// RewriteTimestamp, if set, forces timestamps in generated layers to
+	// not be later than the SourceDateEpoch, if it is set.
+	RewriteTimestamp bool
 	// github.com/containers/image/types SystemContext to hold credentials
 	// and other authentication/authorization information.
 	SystemContext *types.SystemContext
@@ -81,9 +94,18 @@ type CommitOptions struct {
 	// EmptyLayer tells the builder to omit the diff for the working
 	// container.
 	EmptyLayer bool
+	// OmitLayerHistoryEntry tells the builder to omit the diff for the
+	// working container and to not add an entry in the commit history.  By
+	// default, the rest of the image's history is preserved, subject to
+	// the OmitHistory setting.  N.B.: setting this flag, without any
+	// PrependedEmptyLayers, AppendedEmptyLayers, PrependedLinkedLayers, or
+	// AppendedLinkedLayers will more or less produce a copy of the base
+	// image.
+	OmitLayerHistoryEntry bool
 	// OmitTimestamp forces epoch 0 as created timestamp to allow for
 	// deterministic, content-addressable builds.
-	// Deprecated use HistoryTimestamp instead.
+	// Deprecated: use HistoryTimestamp or SourceDateEpoch (possibly with
+	// RewriteTimestamp) instead.
 	OmitTimestamp bool
 	// SignBy is the fingerprint of a GPG key to use for signing the image.
 	SignBy string
@@ -109,7 +131,8 @@ type CommitOptions struct {
 	// contents of a rootfs.
 	ConfidentialWorkloadOptions ConfidentialWorkloadOptions
 	// UnsetEnvs is a list of environments to not add to final image.
-	// Deprecated: use UnsetEnv() before committing instead.
+	// Deprecated: use UnsetEnv() before committing, or set OverrideChanges
+	// instead.
 	UnsetEnvs []string
 	// OverrideConfig is an optional Schema2Config which can override parts
 	// of the working container's configuration for the image that is being
@@ -120,10 +143,11 @@ type CommitOptions struct {
 	// OverrideConfig is applied.
 	OverrideChanges []string
 	// ExtraImageContent is a map which describes additional content to add
-	// to the committed image.  The map's keys are filesystem paths in the
-	// image and the corresponding values are the paths of files whose
-	// contents will be used in their place.  The contents will be owned by
-	// 0:0 and have mode 0644.  Currently only accepts regular files.
+	// to the new layer in the committed image.  The map's keys are
+	// filesystem paths in the image and the corresponding values are the
+	// paths of files whose contents will be used in their place.  The
+	// contents will be owned by 0:0 and have mode 0o644.  Currently only
+	// accepts regular files.
 	ExtraImageContent map[string]string
 	// SBOMScanOptions encapsulates options which control whether or not we
 	// run scanners on the rootfs that we're about to commit, and how.
@@ -132,17 +156,46 @@ type CommitOptions struct {
 	// the image in Docker format.  Newer BuildKit-based builds don't set
 	// this field.
 	CompatSetParent types.OptionalBool
+	// CompatLayerOmissions causes the "/dev", "/proc", and "/sys"
+	// directories to be omitted from the layer diff and related output, as
+	// the classic builder did.  Newer BuildKit-based builds include them
+	// in the built image by default.
+	CompatLayerOmissions types.OptionalBool
+	// PrependedLinkedLayers and AppendedLinkedLayers are combinations of
+	// history entries and locations of either directory trees (if
+	// directories, per os.Stat()) or uncompressed layer blobs which should
+	// be added to the image at commit-time.  The order of these relative
+	// to PrependedEmptyLayers and AppendedEmptyLayers, and relative to the
+	// corresponding members in the Builder object, in the committed image
+	// is not guaranteed.
+	PrependedLinkedLayers, AppendedLinkedLayers []LinkedLayer
+	// UnsetAnnotations is a list of annotations (names only) to withhold
+	// from the image.
+	UnsetAnnotations []string
+	// Annotations is a list of annotations (in the form "key=value") to
+	// add to the image.
+	Annotations []string
+	// CreatedAnnotation controls whether or not an "org.opencontainers.image.created"
+	// annotation is present in the output image.
+	CreatedAnnotation types.OptionalBool
 }
 
-var (
-	// storageAllowedPolicyScopes overrides the policy for local storage
-	// to ensure that we can read images from it.
-	storageAllowedPolicyScopes = signature.PolicyTransportScopes{
-		"": []signature.PolicyRequirement{
-			signature.NewPRInsecureAcceptAnything(),
-		},
-	}
-)
+// LinkedLayer combines a history entry with the location of either a directory
+// tree (if it's a directory, per os.Stat()) or an uncompressed layer blob
+// which should be added to the image at commit-time.  The BlobPath and
+// History.EmptyLayer fields should be considered mutually-exclusive.
+type LinkedLayer struct {
+	History  v1.History // history entry to add
+	BlobPath string     // corresponding uncompressed blob file (layer as a tar archive), or directory tree to archive
+}
+
+// storageAllowedPolicyScopes overrides the policy for local storage
+// to ensure that we can read images from it.
+var storageAllowedPolicyScopes = signature.PolicyTransportScopes{
+	"": []signature.PolicyRequirement{
+		signature.NewPRInsecureAcceptAnything(),
+	},
+}
 
 // checkRegistrySourcesAllows checks the $BUILD_REGISTRY_SOURCES environment
 // variable, if it's set.  The contents are expected to be a JSON-encoded
@@ -257,8 +310,9 @@ func (b *Builder) addManifest(ctx context.Context, manifestName string, imageSpe
 // if commit was successful and the image destination was local.
 func (b *Builder) Commit(ctx context.Context, dest types.ImageReference, options CommitOptions) (string, reference.Canonical, digest.Digest, error) {
 	var (
-		imgID string
-		src   types.ImageReference
+		imgID                string
+		src                  types.ImageReference
+		destinationTimestamp *time.Time
 	)
 
 	// If we weren't given a name, build a destination reference using a
@@ -271,10 +325,14 @@ func (b *Builder) Commit(ctx context.Context, dest types.ImageReference, options
 	// work twice.
 	if options.OmitTimestamp {
 		if options.HistoryTimestamp != nil {
-			return imgID, nil, "", fmt.Errorf("OmitTimestamp ahd HistoryTimestamp can not be used together")
+			return imgID, nil, "", fmt.Errorf("OmitTimestamp and HistoryTimestamp can not be used together")
 		}
 		timestamp := time.Unix(0, 0).UTC()
 		options.HistoryTimestamp = &timestamp
+	}
+	destinationTimestamp = options.HistoryTimestamp
+	if options.SourceDateEpoch != nil {
+		destinationTimestamp = options.SourceDateEpoch
 	}
 	nameToRemove := ""
 	if dest == nil {
@@ -348,6 +406,7 @@ func (b *Builder) Commit(ctx context.Context, dest types.ImageReference, options
 			if options.ExtraImageContent == nil {
 				options.ExtraImageContent = make(map[string]string, len(extraImageContent))
 			}
+			// merge in the scanner-generated content
 			for k, v := range extraImageContent {
 				if _, set := options.ExtraImageContent[k]; !set {
 					options.ExtraImageContent[k] = v
@@ -397,7 +456,7 @@ func (b *Builder) Commit(ctx context.Context, dest types.ImageReference, options
 	}
 
 	var manifestBytes []byte
-	if manifestBytes, err = retryCopyImage(ctx, policyContext, maybeCachedDest, maybeCachedSrc, dest, getCopyOptions(b.store, options.ReportWriter, nil, systemContext, "", false, options.SignBy, options.OciEncryptLayers, options.OciEncryptConfig, nil), options.MaxRetries, options.RetryDelay); err != nil {
+	if manifestBytes, err = retryCopyImage(ctx, policyContext, maybeCachedDest, maybeCachedSrc, dest, getCopyOptions(b.store, options.ReportWriter, nil, systemContext, "", false, options.SignBy, options.OciEncryptLayers, options.OciEncryptConfig, nil, destinationTimestamp), options.MaxRetries, options.RetryDelay); err != nil {
 		return imgID, nil, "", fmt.Errorf("copying layers and metadata for container %q: %w", b.ContainerID, err)
 	}
 	// If we've got more names to attach, and we know how to do that for
@@ -438,7 +497,7 @@ func (b *Builder) Commit(ctx context.Context, dest types.ImageReference, options
 			logrus.Debugf("removing %v from assigned names to image %q", nameToRemove, img.ID)
 		}
 		if options.IIDFile != "" {
-			if err = os.WriteFile(options.IIDFile, []byte("sha256:"+img.ID), 0644); err != nil {
+			if err = os.WriteFile(options.IIDFile, []byte("sha256:"+img.ID), 0o644); err != nil {
 				return imgID, nil, "", err
 			}
 		}
@@ -487,7 +546,6 @@ func (b *Builder) Commit(ctx context.Context, dest types.ImageReference, options
 			return imgID, nil, "", err
 		}
 		logrus.Debugf("added imgID %s to manifestID %s", imgID, manifestID)
-
 	}
 	return imgID, ref, manifestDigest, nil
 }

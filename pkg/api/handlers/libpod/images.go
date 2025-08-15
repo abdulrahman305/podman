@@ -107,7 +107,7 @@ func GetImage(w http.ResponseWriter, r *http.Request) {
 	options := &libimage.InspectOptions{WithParent: true, WithSize: true}
 	inspect, err := newImage.Inspect(r.Context(), options)
 	if err != nil {
-		utils.Error(w, http.StatusInternalServerError, fmt.Errorf("failed in inspect image %s: %w", inspect.ID, err))
+		utils.Error(w, http.StatusInternalServerError, fmt.Errorf("failed in inspect image %s: %w", name, err))
 		return
 	}
 	utils.WriteResponse(w, http.StatusOK, inspect)
@@ -403,14 +403,17 @@ func ImagesImport(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		defer os.Remove(tmpfile.Name())
-		defer tmpfile.Close()
 
 		if _, err := io.Copy(tmpfile, r.Body); err != nil && err != io.EOF {
 			utils.Error(w, http.StatusInternalServerError, fmt.Errorf("unable to write archive to temporary file: %w", err))
+			tmpfile.Close()
 			return
 		}
 
-		tmpfile.Close()
+		if err := tmpfile.Close(); err != nil {
+			utils.Error(w, http.StatusInternalServerError, fmt.Errorf("unable to close tempfile: %w", err))
+			return
+		}
 		source = tmpfile.Name()
 	}
 
@@ -665,6 +668,7 @@ func ImagesRemove(w http.ResponseWriter, r *http.Request) {
 	query := struct {
 		Force          bool `schema:"force"`
 		LookupManifest bool `schema:"lookupManifest"`
+		Ignore         bool `schema:"ignore"`
 	}{
 		Force: false,
 	}
@@ -674,7 +678,7 @@ func ImagesRemove(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	opts := entities.ImageRemoveOptions{Force: query.Force, LookupManifest: query.LookupManifest}
+	opts := entities.ImageRemoveOptions{Force: query.Force, LookupManifest: query.LookupManifest, Ignore: query.Ignore}
 	imageEngine := abi.ImageEngine{Libpod: runtime}
 	rmReport, rmErrors := imageEngine.Remove(r.Context(), []string{utils.GetName(r)}, opts)
 
@@ -713,18 +717,21 @@ func ImageScp(w http.ResponseWriter, r *http.Request) {
 
 	sourceArg := utils.GetName(r)
 
-	rep, source, dest, _, err := domainUtils.ExecuteTransfer(sourceArg, query.Destination, []string{}, query.Quiet, ssh.GolangMode)
+	opts := entities.ScpExecuteTransferOptions{}
+	opts.Quiet = query.Quiet
+	opts.SSHMode = ssh.GolangMode
+	report, err := domainUtils.ExecuteTransfer(sourceArg, query.Destination, opts)
 	if err != nil {
 		utils.Error(w, http.StatusInternalServerError, err)
 		return
 	}
 
-	if source != nil || dest != nil {
+	if report.Source != nil || report.Dest != nil {
 		utils.Error(w, http.StatusBadRequest, fmt.Errorf("cannot use the user transfer function on the remote client: %w", define.ErrInvalidArg))
 		return
 	}
 
-	utils.WriteResponse(w, http.StatusOK, &reports.ScpReport{Id: rep.Names[0]})
+	utils.WriteResponse(w, http.StatusOK, &reports.ScpReport{Id: report.LoadReport.Names[0]})
 }
 
 // Resolve the passed (short) name to one more candidates it may resolve to.

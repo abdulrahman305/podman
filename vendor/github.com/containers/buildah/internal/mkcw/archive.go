@@ -21,9 +21,9 @@ import (
 	"github.com/containers/buildah/pkg/overlay"
 	"github.com/containers/luksy"
 	"github.com/containers/storage/pkg/idtools"
+	"github.com/containers/storage/pkg/ioutils"
 	"github.com/containers/storage/pkg/mount"
 	"github.com/containers/storage/pkg/system"
-	"github.com/docker/docker/pkg/ioutils"
 	"github.com/docker/go-units"
 	digest "github.com/opencontainers/go-digest"
 	v1 "github.com/opencontainers/image-spec/specs-go/v1"
@@ -319,7 +319,7 @@ func Archive(rootfsPath string, ociConfig *v1.Image, options ArchiveOptions) (io
 	imageSize := slop(options.ImageSize, options.Slop)
 	if imageSize == 0 {
 		var sourceSize int64
-		if err := filepath.WalkDir(rootfsPath, func(path string, d fs.DirEntry, err error) error {
+		if err := filepath.WalkDir(rootfsPath, func(_ string, d fs.DirEntry, err error) error {
 			if err != nil && !errors.Is(err, os.ErrNotExist) && !errors.Is(err, os.ErrPermission) {
 				return err
 			}

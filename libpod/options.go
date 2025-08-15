@@ -21,7 +21,6 @@ import (
 	"github.com/containers/podman/v5/libpod/define"
 	"github.com/containers/podman/v5/libpod/events"
 	"github.com/containers/podman/v5/pkg/namespaces"
-	"github.com/containers/podman/v5/pkg/specgen"
 	"github.com/containers/podman/v5/pkg/util"
 	"github.com/containers/storage"
 	"github.com/containers/storage/pkg/fileutils"
@@ -136,22 +135,6 @@ func WithImageStore(imageStore string) RuntimeOption {
 	}
 }
 
-// WithSignaturePolicy specifies the path of a file which decides how trust is
-// managed for images we've pulled.
-// If this is not specified, the system default configuration will be used
-// instead.
-func WithSignaturePolicy(path string) RuntimeOption {
-	return func(rt *Runtime) error {
-		if rt.valid {
-			return define.ErrRuntimeFinalized
-		}
-
-		rt.config.Engine.SignaturePolicyPath = path
-
-		return nil
-	}
-}
-
 // WithOCIRuntime specifies an OCI runtime to use for running containers.
 func WithOCIRuntime(runtime string) RuntimeOption {
 	return func(rt *Runtime) error {
@@ -193,19 +176,6 @@ func WithConmonPath(path string) RuntimeOption {
 		}
 
 		rt.config.Engine.ConmonPath.Set([]string{path})
-
-		return nil
-	}
-}
-
-// WithConmonEnv specifies the environment variable list for the conmon process.
-func WithConmonEnv(environment []string) RuntimeOption {
-	return func(rt *Runtime) error {
-		if rt.valid {
-			return define.ErrRuntimeFinalized
-		}
-
-		rt.config.Engine.ConmonEnvVars.Set(environment)
 
 		return nil
 	}
@@ -330,6 +300,17 @@ func WithCDI(devices []string) CtrCreateOption {
 	}
 }
 
+func WithCDISpecDirs(cdiSpecDirs []string) RuntimeOption {
+	return func(rt *Runtime) error {
+		if rt.valid {
+			return define.ErrRuntimeFinalized
+		}
+
+		rt.config.Engine.CdiSpecDirs.Set(cdiSpecDirs)
+		return nil
+	}
+}
+
 // WithStorageOpts sets the devices to check for CDI configuration.
 func WithStorageOpts(storageOpts map[string]string) CtrCreateOption {
 	return func(ctr *Container) error {
@@ -373,20 +354,6 @@ func WithTmpDir(dir string) RuntimeOption {
 	}
 }
 
-// WithNoPivotRoot sets the runtime to use MS_MOVE instead of PIVOT_ROOT when
-// starting containers.
-func WithNoPivotRoot() RuntimeOption {
-	return func(rt *Runtime) error {
-		if rt.valid {
-			return define.ErrRuntimeFinalized
-		}
-
-		rt.config.Engine.NoPivotRoot = true
-
-		return nil
-	}
-}
-
 // WithNetworkConfigDir sets the network configuration directory.
 func WithNetworkConfigDir(dir string) RuntimeOption {
 	return func(rt *Runtime) error {
@@ -395,19 +362,6 @@ func WithNetworkConfigDir(dir string) RuntimeOption {
 		}
 
 		rt.config.Network.NetworkConfigDir = dir
-
-		return nil
-	}
-}
-
-// WithCNIPluginDir sets the CNI plugins directory.
-func WithCNIPluginDir(dir string) RuntimeOption {
-	return func(rt *Runtime) error {
-		if rt.valid {
-			return define.ErrRuntimeFinalized
-		}
-
-		rt.config.Network.CNIPluginDirs.Set([]string{dir})
 
 		return nil
 	}
@@ -444,20 +398,6 @@ func WithVolumePath(volPath string) RuntimeOption {
 
 		rt.config.Engine.VolumePath = volPath
 		rt.storageSet.VolumePathSet = true
-
-		return nil
-	}
-}
-
-// WithDefaultInfraCommand sets the command to
-// run on pause container start up.
-func WithDefaultInfraCommand(cmd string) RuntimeOption {
-	return func(rt *Runtime) error {
-		if rt.valid {
-			return define.ErrRuntimeFinalized
-		}
-
-		rt.config.Engine.InfraCommand = cmd
 
 		return nil
 	}
@@ -850,28 +790,6 @@ func WithIDMappings(idmappings storage.IDMappingOptions) CtrCreateOption {
 	}
 }
 
-// WithUTSNSFromPod indicates that the container should join the UTS namespace of
-// its pod
-func WithUTSNSFromPod(p *Pod) CtrCreateOption {
-	return func(ctr *Container) error {
-		if ctr.valid {
-			return define.ErrCtrFinalized
-		}
-
-		if err := validPodNSOption(p, ctr.config.Pod); err != nil {
-			return err
-		}
-
-		infraContainer, err := p.InfraContainerID()
-		if err != nil {
-			return err
-		}
-		ctr.config.UTSNsCtr = infraContainer
-
-		return nil
-	}
-}
-
 // WithIPCNSFrom indicates that the container should join the IPC namespace of
 // the given container.
 // If the container has joined a pod, it can only join the namespaces of
@@ -887,25 +805,6 @@ func WithIPCNSFrom(nsCtr *Container) CtrCreateOption {
 		}
 
 		ctr.config.IPCNsCtr = nsCtr.ID()
-
-		return nil
-	}
-}
-
-// WithMountNSFrom indicates that the container should join the mount namespace
-// of the given container.
-// If the container has joined a pod, it can only join the namespaces of
-// containers in the same pod.
-func WithMountNSFrom(nsCtr *Container) CtrCreateOption {
-	return func(ctr *Container) error {
-		if ctr.valid {
-			return define.ErrCtrFinalized
-		}
-
-		if err := checkDependencyContainer(nsCtr, ctr); err != nil {
-			return err
-		}
-		ctr.config.MountNsCtr = nsCtr.ID()
 
 		return nil
 	}
@@ -1144,8 +1043,16 @@ func WithLogPath(path string) CtrCreateOption {
 		if path == "" {
 			return fmt.Errorf("log path must be set: %w", define.ErrInvalidArg)
 		}
+		if isDirectory(path) {
+			containerDir := filepath.Join(path, ctr.ID())
+			if err := os.Mkdir(containerDir, 0755); err != nil {
+				return fmt.Errorf("failed to create container log directory %s: %w", containerDir, err)
+			}
 
-		ctr.config.LogPath = path
+			ctr.config.LogPath = filepath.Join(containerDir, "ctr.log")
+		} else {
+			ctr.config.LogPath = path
+		}
 
 		return nil
 	}
@@ -1361,22 +1268,6 @@ func WithRootFS(rootfs string, overlay bool, mapping *string) CtrCreateOption {
 	}
 }
 
-// WithCtrNamespace sets the namespace the container will be created in.
-// Namespaces are used to create separate views of Podman's state - runtimes can
-// join a specific namespace and see only containers and pods in that namespace.
-// Empty string namespaces are allowed, and correspond to a lack of namespace.
-func WithCtrNamespace(ns string) CtrCreateOption {
-	return func(ctr *Container) error {
-		if ctr.valid {
-			return define.ErrCtrFinalized
-		}
-
-		ctr.config.Namespace = ns
-
-		return nil
-	}
-}
-
 // WithUseImageResolvConf tells the container not to bind-mount resolv.conf in.
 // This conflicts with other DNS-related options.
 func WithUseImageResolvConf() CtrCreateOption {
@@ -1386,6 +1277,19 @@ func WithUseImageResolvConf() CtrCreateOption {
 		}
 
 		ctr.config.UseImageResolvConf = true
+
+		return nil
+	}
+}
+
+// WithUseImageHostname tells the container not to bind-mount /etc/hostname in.
+func WithUseImageHostname() CtrCreateOption {
+	return func(ctr *Container) error {
+		if ctr.valid {
+			return define.ErrCtrFinalized
+		}
+
+		ctr.config.UseImageHostname = true
 
 		return nil
 	}
@@ -1504,6 +1408,19 @@ func WithImageVolumes(volumes []*ContainerImageVolume) CtrCreateOption {
 	}
 }
 
+// WithImageVolumes adds the given image volumes to the container.
+func WithArtifactVolumes(volumes []*ContainerArtifactVolume) CtrCreateOption {
+	return func(ctr *Container) error {
+		if ctr.valid {
+			return define.ErrCtrFinalized
+		}
+
+		ctr.config.ArtifactVolumes = volumes
+
+		return nil
+	}
+}
+
 // WithHealthCheck adds the healthcheck to the container config
 func WithHealthCheck(healthCheck *manifest.Schema2HealthConfig) CtrCreateOption {
 	return func(ctr *Container) error {
@@ -1521,25 +1438,11 @@ func WithHealthCheckLogDestination(destination string) CtrCreateOption {
 		if ctr.valid {
 			return define.ErrCtrFinalized
 		}
-		switch destination {
-		case define.HealthCheckEventsLoggerDestination, define.DefaultHealthCheckLocalDestination:
-			ctr.config.HealthLogDestination = destination
-		default:
-			fileInfo, err := os.Stat(destination)
-			if err != nil {
-				return fmt.Errorf("HealthCheck Log '%s' destination error: %w", destination, err)
-			}
-			mode := fileInfo.Mode()
-			if !mode.IsDir() {
-				return fmt.Errorf("HealthCheck Log '%s' destination must be directory", destination)
-			}
-
-			absPath, err := filepath.Abs(destination)
-			if err != nil {
-				return err
-			}
-			ctr.config.HealthLogDestination = absPath
+		dest, err := define.GetValidHealthCheckDestination(destination)
+		if err != nil {
+			return err
 		}
+		ctr.config.HealthLogDestination = &dest
 		return nil
 	}
 }
@@ -1550,7 +1453,7 @@ func WithHealthCheckMaxLogCount(maxLogCount uint) CtrCreateOption {
 		if ctr.valid {
 			return define.ErrCtrFinalized
 		}
-		ctr.config.HealthMaxLogCount = maxLogCount
+		ctr.config.HealthMaxLogCount = &maxLogCount
 		return nil
 	}
 }
@@ -1561,7 +1464,7 @@ func WithHealthCheckMaxLogSize(maxLogSize uint) CtrCreateOption {
 		if ctr.valid {
 			return define.ErrCtrFinalized
 		}
-		ctr.config.HealthMaxLogSize = maxLogSize
+		ctr.config.HealthMaxLogSize = &maxLogSize
 		return nil
 	}
 }
@@ -1622,6 +1525,20 @@ func withIsInfra() CtrCreateOption {
 		}
 
 		ctr.config.IsInfra = true
+
+		return nil
+	}
+}
+
+// withIsDefaultInfra allows us to differentiate between the default infra containers generated
+// directly by podman and custom infra containers within the container config
+func withIsDefaultInfra() CtrCreateOption {
+	return func(ctr *Container) error {
+		if ctr.valid {
+			return define.ErrCtrFinalized
+		}
+
+		ctr.config.IsDefaultInfra = true
 
 		return nil
 	}
@@ -1981,25 +1898,6 @@ func WithSelectedPasswordManagement(passwd *bool) CtrCreateOption {
 	}
 }
 
-// WithInfraConfig allows for inheritance of compatible config entities from the infra container
-func WithInfraConfig(compatibleOptions InfraInherit) CtrCreateOption {
-	return func(ctr *Container) error {
-		if ctr.valid {
-			return define.ErrCtrFinalized
-		}
-		compatMarshal, err := json.Marshal(compatibleOptions)
-		if err != nil {
-			return errors.New("could not marshal compatible options")
-		}
-
-		err = json.Unmarshal(compatMarshal, ctr.config)
-		if err != nil {
-			return errors.New("could not unmarshal compatible options into container config")
-		}
-		return nil
-	}
-}
-
 // WithStartupHealthcheck sets a startup healthcheck for the container.
 // Requires that a healthcheck must be set.
 func WithStartupHealthcheck(startupHC *define.StartupHealthCheck) CtrCreateOption {
@@ -2117,18 +2015,6 @@ func WithPodHostname(hostname string) PodCreateOption {
 	}
 }
 
-// WithInfraConmonPidFile sets the path to a custom conmon PID file for the
-// infra container.
-func WithInfraConmonPidFile(path string, infraSpec *specgen.SpecGenerator) PodCreateOption {
-	return func(pod *Pod) error {
-		if pod.valid {
-			return define.ErrPodFinalized
-		}
-		infraSpec.ConmonPidFile = path
-		return nil
-	}
-}
-
 // WithPodLabels sets the labels of a pod.
 func WithPodLabels(labels map[string]string) PodCreateOption {
 	return func(pod *Pod) error {
@@ -2174,23 +2060,6 @@ func WithPodParent() PodCreateOption {
 	}
 }
 
-// WithPodNamespace sets the namespace for the created pod.
-// Namespaces are used to create separate views of Podman's state - runtimes can
-// join a specific namespace and see only containers and pods in that namespace.
-// Empty string namespaces are allowed, and correspond to a lack of namespace.
-// Containers must belong to the same namespace as the pod they join.
-func WithPodNamespace(ns string) PodCreateOption {
-	return func(pod *Pod) error {
-		if pod.valid {
-			return define.ErrPodFinalized
-		}
-
-		pod.config.Namespace = ns
-
-		return nil
-	}
-}
-
 // WithPodIPC tells containers in this pod to use the ipc namespace
 // created for this pod.
 // Containers in a pod will inherit the kernel namespaces from the
@@ -2218,24 +2087,6 @@ func WithPodNet() PodCreateOption {
 		}
 
 		pod.config.UsePodNet = true
-
-		return nil
-	}
-}
-
-// WithPodMount tells containers in this pod to use the mount namespace
-// created for this pod.
-// Containers in a pod will inherit the kernel namespaces from the
-// first container added.
-// TODO implement WithMountNSFrom, so WithMountNsFromPod functions properly
-// Then this option can be added on the pod level
-func WithPodMount() PodCreateOption {
-	return func(pod *Pod) error {
-		if pod.valid {
-			return define.ErrPodFinalized
-		}
-
-		pod.config.UsePodMount = true
 
 		return nil
 	}

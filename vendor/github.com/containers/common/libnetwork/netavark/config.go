@@ -30,6 +30,9 @@ func sliceRemoveDuplicates(strList []string) []string {
 }
 
 func (n *netavarkNetwork) commitNetwork(network *types.Network) error {
+	if err := os.MkdirAll(n.networkConfigDir, 0o755); err != nil {
+		return nil
+	}
 	confPath := filepath.Join(n.networkConfigDir, network.Name+".json")
 	f, err := os.Create(confPath)
 	if err != nil {
@@ -166,11 +169,9 @@ func (n *netavarkNetwork) networkCreate(newNetwork *types.Network, defaultNet bo
 	switch newNetwork.Driver {
 	case types.BridgeNetworkDriver:
 		internalutil.MapDockerBridgeDriverOptions(newNetwork)
-		err = internalutil.CreateBridge(n, newNetwork, usedNetworks, n.defaultsubnetPools)
-		if err != nil {
-			return nil, err
-		}
-		// validate the given options, we do not need them but just check to make sure they are valid
+
+		checkBridgeConflict := true
+		// validate the given options,
 		for key, value := range newNetwork.Options {
 			switch key {
 			case types.MTUOption:
@@ -184,6 +185,15 @@ func (n *netavarkNetwork) networkCreate(newNetwork *types.Network, defaultNet bo
 				if err != nil {
 					return nil, err
 				}
+				// Unset used networks here to ensure that when using vlan networks
+				// we do not error if the subnet is already in use on the host.
+				// https://github.com/containers/podman/issues/25736
+				usedNetworks = nil
+				// If there is no vlan there should be no other config with the same bridge.
+				// However with vlan we want to allow that so that you can have different
+				// configs on the same bridge but different vlans
+				// https://github.com/containers/common/issues/2095
+				checkBridgeConflict = false
 
 			case types.IsolateOption:
 				val, err := internalutil.ParseIsolate(value)
@@ -207,10 +217,29 @@ func (n *netavarkNetwork) networkCreate(newNetwork *types.Network, defaultNet bo
 				if len(value) == 0 {
 					return nil, errors.New("invalid vrf name")
 				}
+			case types.ModeOption:
+				switch value {
+				case types.BridgeModeManaged:
+				case types.BridgeModeUnmanaged:
+					// Unset used networks here to ensure that when using unmanaged networks
+					// we do not error if the subnet is already in use on the host.
+					// https://github.com/containers/common/issues/2322
+					usedNetworks = nil
+					// Also make sure we don't error if the bridge name is already used as well.
+					checkBridgeConflict = false
+				default:
+					return nil, fmt.Errorf("unknown bridge mode %q", value)
+				}
 			default:
 				return nil, fmt.Errorf("unsupported bridge network option %s", key)
 			}
 		}
+
+		err = internalutil.CreateBridge(n, newNetwork, usedNetworks, n.defaultsubnetPools, checkBridgeConflict)
+		if err != nil {
+			return nil, err
+		}
+
 	case types.MacVLANNetworkDriver, types.IPVLANNetworkDriver:
 		err = createIpvlanOrMacvlan(newNetwork)
 		if err != nil {
@@ -278,10 +307,7 @@ func createIpvlanOrMacvlan(network *types.Network) error {
 	}
 
 	driver := network.Driver
-	isMacVlan := true
-	if driver == types.IPVLANNetworkDriver {
-		isMacVlan = false
-	}
+	isMacVlan := driver != types.IPVLANNetworkDriver
 
 	// always turn dns off with macvlan, it is not implemented in netavark
 	// and makes little sense to support with macvlan

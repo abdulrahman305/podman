@@ -3,11 +3,13 @@
 package machine
 
 import (
+	"errors"
 	"fmt"
 	"os"
 
 	"github.com/containers/common/pkg/completion"
 	"github.com/containers/common/pkg/strongunits"
+	"github.com/containers/image/v5/types"
 	"github.com/containers/podman/v5/cmd/podman/registry"
 	ldefine "github.com/containers/podman/v5/libpod/define"
 	"github.com/containers/podman/v5/libpod/events"
@@ -40,6 +42,7 @@ var (
 // Flags which have a meaning when unspecified that differs from the flag default
 type InitOptionalFlags struct {
 	UserModeNetworking bool
+	tlsVerify          bool
 }
 
 // maxMachineNameSize is set to thirty to limit huge machine names primarily
@@ -62,6 +65,10 @@ func init() {
 	)
 	_ = initCmd.RegisterFlagCompletionFunc(cpusFlagName, completion.AutocompleteNone)
 
+	runPlaybookFlagName := "playbook"
+	flags.StringVar(&initOpts.PlaybookPath, runPlaybookFlagName, "", "Run an Ansible playbook after first boot")
+	_ = initCmd.RegisterFlagCompletionFunc(runPlaybookFlagName, completion.AutocompleteDefault)
+
 	diskSizeFlagName := "disk-size"
 	flags.Uint64Var(
 		&initOpts.DiskSize,
@@ -78,6 +85,14 @@ func init() {
 		"Memory in MiB",
 	)
 	_ = initCmd.RegisterFlagCompletionFunc(memoryFlagName, completion.AutocompleteNone)
+
+	swapFlagName := "swap"
+	flags.Uint64VarP(
+		&initOpts.Swap,
+		swapFlagName, "s", 0,
+		"Swap in MiB",
+	)
+	_ = initCmd.RegisterFlagCompletionFunc(swapFlagName, completion.AutocompleteNone)
 
 	flags.BoolVar(
 		&now,
@@ -141,6 +156,9 @@ func init() {
 	userModeNetFlagName := "user-mode-networking"
 	flags.BoolVar(&initOptionalFlags.UserModeNetworking, userModeNetFlagName, false,
 		"Whether this machine should use user-mode networking, routing traffic through a host user-space process")
+
+	flags.BoolVar(&initOptionalFlags.tlsVerify, "tls-verify", true,
+		"Require HTTPS and verify certificates when contacting registries")
 }
 
 func initMachine(cmd *cobra.Command, args []string) error {
@@ -206,6 +224,16 @@ func initMachine(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	// initOpts.SkipTlsVerify defaults to OptionalBoolUndefined, which means the backend library
+	// decides whether to verify TLS. We only explicitly set it if the user specifies the
+	// --tls-verify flag on the CLI.
+	//
+	// The flag value from initOptionalFlags.tlsVerify indicates whether TLS verification is desired.
+	// Since we are converting tlsVerify -> SkipTlsVerify, we must invert the bool accordingly.
+	if cmd.Flags().Changed("tls-verify") {
+		initOpts.SkipTlsVerify = types.NewOptionalBool(!initOptionalFlags.tlsVerify)
+	}
+
 	// TODO need to work this back in
 	// if finished, err := vm.Init(initOpts); err != nil || !finished {
 	// 	// Finished = true,  err  = nil  -  Success! Log a message with further instructions
@@ -220,6 +248,14 @@ func initMachine(cmd *cobra.Command, args []string) error {
 
 	err = shim.Init(initOpts, provider)
 	if err != nil {
+		// The installation is partially complete and podman should
+		// exit gracefully with no error and no success message.
+		// Examples:
+		// - a user has chosen to perform their own reboot
+		// - reexec for limited admin operations, returning to parent
+		if errors.Is(err, define.ErrInitRelaunchAttempt) {
+			return nil
+		}
 		return err
 	}
 
@@ -245,7 +281,7 @@ func checkMaxMemory(newMem strongunits.MiB) error {
 		return err
 	}
 	if total := strongunits.B(memStat.Total); strongunits.B(memStat.Total) < newMem.ToBytes() {
-		return fmt.Errorf("requested amount of memory (%d MB) greater than total system memory (%d MB)", newMem, total)
+		return fmt.Errorf("requested amount of memory (%d MB) greater than total system memory (%d MB)", newMem, strongunits.ToMib(total))
 	}
 	return nil
 }

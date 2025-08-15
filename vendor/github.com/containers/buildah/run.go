@@ -5,11 +5,13 @@ import (
 	"io"
 	"net"
 
+	"github.com/containers/buildah/copier"
 	"github.com/containers/buildah/define"
 	"github.com/containers/buildah/internal"
 	"github.com/containers/buildah/pkg/sshagent"
 	"github.com/containers/common/libnetwork/etchosts"
 	"github.com/containers/image/v5/types"
+	"github.com/containers/storage/pkg/idtools"
 	"github.com/containers/storage/pkg/lockfile"
 	"github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/sirupsen/logrus"
@@ -19,6 +21,15 @@ const (
 	// runUsingRuntimeCommand is a command we use as a key for reexec
 	runUsingRuntimeCommand = define.Package + "-oci-runtime"
 )
+
+// compatLayerExclusions is the set of items to omit from layers if
+// options.CompatLayerOmissions is set to true.  For whatever reason, the
+// classic builder didn't bake these into images, but BuildKit does.
+var compatLayerExclusions = []copier.ConditionalRemovePath{
+	{Path: "dev", Owner: &idtools.IDPair{UID: 0, GID: 0}},
+	{Path: "proc", Owner: &idtools.IDPair{UID: 0, GID: 0}},
+	{Path: "sys", Owner: &idtools.IDPair{UID: 0, GID: 0}},
+}
 
 // TerminalPolicy takes the value DefaultTerminal, WithoutTerminal, or WithTerminal.
 type TerminalPolicy int
@@ -159,9 +170,9 @@ type RunOptions struct {
 	RunMounts []string
 	// Map of stages and container mountpoint if any from stage executor
 	StageMountPoints map[string]internal.StageMountDetails
-	// External Image mounts to be cleaned up.
-	// Buildah run --mount could mount image before RUN calls, RUN could cleanup
-	// them up as well
+	// IDs of mounted images to be unmounted before returning
+	// Deprecated: before 1.39, these images would not be consistently
+	// unmounted if Run() returned an error
 	ExternalImageMounts []string
 	// System context of current build
 	SystemContext *types.SystemContext
@@ -180,18 +191,18 @@ type RunOptions struct {
 
 // RunMountArtifacts are the artifacts created when using a run mount.
 type runMountArtifacts struct {
-	// RunMountTargets are the run mount targets inside the container
-	RunMountTargets []string
-	// TmpFiles are artifacts that need to be removed outside the container
-	TmpFiles []string
-	// Any external images which were mounted inside container
+	// RunOverlayDirs are overlay directories which will need to be cleaned up using overlay.RemoveTemp()
+	RunOverlayDirs []string
+	// Any images which were mounted, which should be unmounted
 	MountedImages []string
-	// Agents are the ssh agents started
+	// Agents are the ssh agents started, which should have their Shutdown() methods called
 	Agents []*sshagent.AgentServer
 	// SSHAuthSock is the path to the ssh auth sock inside the container
 	SSHAuthSock string
-	// TargetLocks to be unlocked if there are any.
+	// Lock files, which should have their Unlock() methods called
 	TargetLocks []*lockfile.LockFile
+	// Intermediate mount points, which should be Unmount()ed and Removed()d
+	IntermediateMounts []string
 }
 
 // RunMountInfo are the available run mounts for this run
@@ -222,9 +233,10 @@ type IDMaps struct {
 
 // netResult type to hold network info for hosts/resolv.conf
 type netResult struct {
-	entries           etchosts.HostEntries
-	dnsServers        []string
-	excludeIPs        []net.IP
-	ipv6              bool
-	keepHostResolvers bool
+	entries                           etchosts.HostEntries
+	dnsServers                        []string
+	excludeIPs                        []net.IP
+	ipv6                              bool
+	keepHostResolvers                 bool
+	preferredHostContainersInternalIP string
 }

@@ -1,8 +1,6 @@
-name: Sign and Upload Mac Installer
+name: Sign and Upload Mac Installer [DEPRECATED]
 
 on:
-  release:
-    types: [created, published]
   workflow_dispatch:
     inputs:
       version:
@@ -98,7 +96,7 @@ jobs:
         steps.check.outputs.buildarm == 'true' ||
         steps.check.outputs.builduniversal == 'true' ||
         steps.actual_dryrun.outputs.dryrun == 'true'
-      uses: actions/checkout@v4
+      uses: actions/checkout@v5
       with:
         ref: ${{steps.getversion.outputs.version}}
     - name: Set up Go

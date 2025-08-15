@@ -57,6 +57,8 @@ type InspectContainerConfig struct {
 	Annotations map[string]string `json:"Annotations"`
 	// Container stop signal
 	StopSignal string `json:"StopSignal"`
+	// Configured startup healthcheck for the container
+	StartupHealthCheck *StartupHealthCheck `json:"StartupHealthCheck,omitempty"`
 	// Configured healthcheck for the container
 	Healthcheck *manifest.Schema2HealthConfig `json:"Healthcheck,omitempty"`
 	// HealthcheckOnFailureAction defines an action to take once the container turns unhealthy.
@@ -283,6 +285,9 @@ type InspectMount struct {
 	// Mount propagation for the mount. Can be empty if not specified, but
 	// is always printed - no omitempty.
 	Propagation string `json:"Propagation"`
+	// SubPath object from the volume. Specified as a path within
+	// the source volume to be mounted at the Destination.
+	SubPath string `json:"SubPath,omitempty"`
 }
 
 // InspectContainerState provides a detailed record of a container's current
@@ -351,8 +356,6 @@ type HealthCheckLog struct {
 // as possible from the spec and container config.
 // Some things cannot be inferred. These will be populated by spec annotations
 // (if available).
-//
-//nolint:revive,stylecheck // Field names are fixed for compatibility and cannot be changed.
 type InspectContainerHostConfig struct {
 	// Binds contains an array of user-added mounts.
 	// Both volume mounts and named volumes are included.
@@ -438,6 +441,8 @@ type InspectContainerHostConfig struct {
 	// ExtraHosts contains hosts that will be added to the container's
 	// /etc/hosts.
 	ExtraHosts []string `json:"ExtraHosts"`
+	// HostsFile is the base file to create the `/etc/hosts` file inside the container.
+	HostsFile string `json:"HostsFile"`
 	// GroupAdd contains groups that the user inside the container will be
 	// added to.
 	GroupAdd []string `json:"GroupAdd"`
@@ -791,6 +796,8 @@ type InspectContainerData struct {
 	LockNumber              uint32                      `json:"lockNumber"`
 	Config                  *InspectContainerConfig     `json:"Config"`
 	HostConfig              *InspectContainerHostConfig `json:"HostConfig"`
+	UseImageHosts           bool                        `json:"UseImageHosts"`
+	UseImageHostname        bool                        `json:"UseImageHostname"`
 }
 
 // InspectExecSession contains information about a given exec session.

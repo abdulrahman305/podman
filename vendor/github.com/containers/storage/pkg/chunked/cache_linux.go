@@ -16,7 +16,7 @@ import (
 
 	storage "github.com/containers/storage"
 	graphdriver "github.com/containers/storage/drivers"
-	"github.com/containers/storage/pkg/chunked/internal"
+	"github.com/containers/storage/pkg/chunked/internal/minimal"
 	"github.com/containers/storage/pkg/ioutils"
 	"github.com/docker/go-units"
 	jsoniter "github.com/json-iterator/go"
@@ -182,6 +182,9 @@ func makeBinaryDigest(stringDigest string) ([]byte, error) {
 	return buf, nil
 }
 
+// loadLayerCache attempts to load the cache file for the specified layer.
+// If the cache file is not present or it it using a different cache file version, then
+// the function returns (nil, nil).
 func (c *layersCache) loadLayerCache(layerID string) (_ *layer, errRet error) {
 	buffer, mmapBuffer, err := c.loadLayerBigData(layerID, cacheKey)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -201,6 +204,9 @@ func (c *layersCache) loadLayerCache(layerID string) (_ *layer, errRet error) {
 	cacheFile, err := readCacheFileFromMemory(buffer)
 	if err != nil {
 		return nil, err
+	}
+	if cacheFile == nil {
+		return nil, nil
 	}
 	return c.createLayer(layerID, cacheFile, mmapBuffer)
 }
@@ -268,7 +274,7 @@ func (c *layersCache) load() error {
 	var newLayers []*layer
 	for _, r := range allLayers {
 		// The layer is present in the store and it is already loaded.  Attempt to
-		// re-use it if mmap'ed.
+		// reuse it if mmap'ed.
 		if l, found := loadedLayers[r.ID]; found {
 			// If the layer is not marked for re-load, move it to newLayers.
 			if !l.reloadWithMmap {
@@ -297,7 +303,7 @@ func (c *layersCache) load() error {
 
 		// the cache file is either not present or broken.  Try to generate it from the TOC.
 		l, err = c.createCacheFileFromTOC(r.ID)
-		if err != nil {
+		if err != nil && !errors.Is(err, storage.ErrLayerUnknown) {
 			logrus.Warningf("Error creating cache file for layer %q: %v", r.ID, err)
 		}
 		if l != nil {
@@ -618,6 +624,8 @@ func writeCache(manifest []byte, format graphdriver.DifferOutputFormat, id strin
 	}, nil
 }
 
+// readCacheFileFromMemory reads a cache file from a buffer.
+// It can return (nil, nil) if the cache file uses a different file version that the one currently supported.
 func readCacheFileFromMemory(bigDataBuffer []byte) (*cacheFile, error) {
 	bigData := bytes.NewReader(bigDataBuffer)
 
@@ -702,7 +710,7 @@ func prepareCacheFile(manifest []byte, format graphdriver.DifferOutputFormat) ([
 	switch format {
 	case graphdriver.DifferOutputFormatDir:
 	case graphdriver.DifferOutputFormatFlat:
-		entries, err = makeEntriesFlat(entries)
+		entries, err = makeEntriesFlat(entries, nil)
 		if err != nil {
 			return nil, err
 		}
@@ -840,12 +848,12 @@ func (c *layersCache) findFileInOtherLayers(file *fileMetadata, useHardLinks boo
 	return "", "", nil
 }
 
-func (c *layersCache) findChunkInOtherLayers(chunk *internal.FileMetadata) (string, string, int64, error) {
+func (c *layersCache) findChunkInOtherLayers(chunk *minimal.FileMetadata) (string, string, int64, error) {
 	return c.findDigestInternal(chunk.ChunkDigest)
 }
 
-func unmarshalToc(manifest []byte) (*internal.TOC, error) {
-	var toc internal.TOC
+func unmarshalToc(manifest []byte) (*minimal.TOC, error) {
+	var toc minimal.TOC
 
 	iter := jsoniter.ParseBytes(jsoniter.ConfigFastest, manifest)
 
@@ -856,7 +864,7 @@ func unmarshalToc(manifest []byte) (*internal.TOC, error) {
 
 		case "entries":
 			for iter.ReadArray() {
-				var m internal.FileMetadata
+				var m minimal.FileMetadata
 				for field := iter.ReadObject(); field != ""; field = iter.ReadObject() {
 					switch strings.ToLower(field) {
 					case "type":

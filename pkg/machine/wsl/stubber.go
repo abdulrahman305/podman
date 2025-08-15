@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"strings"
 
 	"github.com/containers/podman/v5/pkg/machine/env"
@@ -35,11 +34,6 @@ func (w WSLStubber) CreateVM(opts define.CreateVMOpts, mc *vmconfigs.MachineConf
 	go callbackFuncs.CleanOnSignal()
 	mc.WSLHypervisor = new(vmconfigs.WSLConfig)
 
-	if cont, err := checkAndInstallWSL(opts.ReExec); !cont {
-		appendOutputIfError(opts.ReExec, err)
-		return err
-	}
-
 	_ = setupWslProxyEnv()
 
 	if opts.UserModeNetworking {
@@ -52,6 +46,15 @@ func (w WSLStubber) CreateVM(opts define.CreateVMOpts, mc *vmconfigs.MachineConf
 	const prompt = "Importing operating system into WSL (this may take a few minutes on a new WSL install)..."
 	dist, err := provisionWSLDist(mc.Name, mc.ImagePath.GetPath(), prompt)
 	if err != nil {
+		if errors.Is(err, ErrWslNotSupported) {
+			// If error is Wsl/Service/RegisterDistro/CreateVm/HCS/ERROR_NOT_SUPPORTED
+			// or Wsl/Service/RegisterDistro/CreateVm/HCS/HCS_E_SERVICE_NOT_AVAILABLE
+			// it means WSL's VM creation failed, likely due to virtualization features not being enabled.
+			// Relaunching 'podman machine init' in elevated mode will attempt to reconfigure the WSL machine.
+			admin := HasAdminRights()
+
+			return attemptFeatureInstall(opts.ReExec, admin)
+		}
 		return err
 	}
 
@@ -68,7 +71,7 @@ func (w WSLStubber) CreateVM(opts define.CreateVMOpts, mc *vmconfigs.MachineConf
 	}
 
 	fmt.Println("Configuring system...")
-	if err = configureSystem(mc, dist); err != nil {
+	if err = configureSystem(mc, dist, mc.Ansible); err != nil {
 		return err
 	}
 
@@ -105,7 +108,8 @@ func (w WSLStubber) Remove(mc *vmconfigs.MachineConfig) ([]string, func() error,
 	// below if we wanted to hard error on the wsl unregister
 	// of the vm
 	wslRemoveFunc := func() error {
-		if err := runCmdPassThrough(wutil.FindWSL(), "--unregister", env.WithPodmanPrefix(mc.Name)); err != nil {
+		cmd := wutil.NewWSLCommand("--unregister", env.WithPodmanPrefix(mc.Name))
+		if err := runCmdPassThrough(cmd); err != nil {
 			return err
 		}
 		return nil
@@ -186,6 +190,10 @@ func (w WSLStubber) RequireExclusiveActive() bool {
 }
 
 func (w WSLStubber) PostStartNetworking(mc *vmconfigs.MachineConfig, noInfo bool) error {
+	socket, err := mc.APISocket()
+	if err != nil {
+		return err
+	}
 	winProxyOpts := machine.WinProxyOpts{
 		Name:           mc.Name,
 		IdentityPath:   mc.SSH.IdentityPath,
@@ -193,6 +201,7 @@ func (w WSLStubber) PostStartNetworking(mc *vmconfigs.MachineConfig, noInfo bool
 		RemoteUsername: mc.SSH.RemoteUsername,
 		Rootful:        mc.HostUser.Rootful,
 		VMType:         w.VMType(),
+		Socket:         socket,
 	}
 	machine.LaunchWinProxy(winProxyOpts, noInfo)
 
@@ -245,7 +254,7 @@ func (w WSLStubber) StopVM(mc *vmconfigs.MachineConfig, hardStop bool) error {
 		fmt.Fprintf(os.Stderr, "Could not stop API forwarding service (win-sshproxy.exe): %s\n", err.Error())
 	}
 
-	cmd := exec.Command(wutil.FindWSL(), "-u", "root", "-d", dist, "sh")
+	cmd := wutil.NewWSLCommand("-u", "root", "-d", dist, "sh")
 	cmd.Stdin = strings.NewReader(waitTerm)
 	out := &bytes.Buffer{}
 	cmd.Stderr = out
@@ -255,7 +264,7 @@ func (w WSLStubber) StopVM(mc *vmconfigs.MachineConfig, hardStop bool) error {
 		return fmt.Errorf("executing wait command: %w", err)
 	}
 
-	exitCmd := exec.Command(wutil.FindWSL(), "-u", "root", "-d", dist, "/usr/local/bin/enterns", "systemctl", "exit", "0")
+	exitCmd := wutil.NewWSLCommand("-u", "root", "-d", dist, "/usr/local/bin/enterns", "systemctl", "exit", "0")
 	if err = exitCmd.Run(); err != nil {
 		return fmt.Errorf("stopping systemd: %w", err)
 	}

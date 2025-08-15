@@ -135,6 +135,15 @@ func (n *Netns) getOrCreateNetns() (ns.NetNS, bool, error) {
 		}
 		// In case of errors continue and setup the network cmd again.
 	} else {
+		// Special case, the file might exist already but is not a valid netns.
+		// One reason could be that a previous setup was killed between creating
+		// the file and mounting it. Or if the file is not on tmpfs (deleted on boot)
+		// you might run into it as well: https://github.com/containers/podman/issues/25144
+		// We have to do this because NewNSAtPath fails with EEXIST otherwise
+		if errors.As(err, &ns.NSPathNotNSErr{}) {
+			// We don't care if this fails, NewNSAtPath() should return the real error.
+			_ = os.Remove(nsPath)
+		}
 		logrus.Debugf("Creating rootless network namespace at %q", nsPath)
 		// We have to create the netns dir again here because it is possible
 		// that cleanup() removed it.
@@ -201,7 +210,7 @@ func (n *Netns) setupPasta(nsPath string) error {
 		Netns:        nsPath,
 		ExtraOptions: []string{"--pid", pidPath},
 	}
-	res, err := pasta.Setup2(&pastaOpts)
+	res, err := pasta.Setup(&pastaOpts)
 	if err != nil {
 		return fmt.Errorf("setting up Pasta: %w", err)
 	}
@@ -360,9 +369,14 @@ func (n *Netns) setupMounts() error {
 
 	// Ensure we mount private in our mountns to prevent accidentally
 	// overwriting the host mounts in case the default propagation is shared.
-	err = unix.Mount("", "/", "", unix.MS_PRIVATE|unix.MS_REC, "")
+	// However using private propagation is not what we want. New mounts/umounts
+	// would not be propagated into our namespace. This is a problem because we
+	// may hold mount points open that were unmounted on the host confusing users
+	// why the underlying device is still busy as they no longer see the mount:
+	// https://github.com/containers/podman/issues/25994
+	err = unix.Mount("", "/", "", unix.MS_SLAVE|unix.MS_REC, "")
 	if err != nil {
-		return wrapError("make tree private in new mount namespace", err)
+		return wrapError("set mount propagation to slave in new mount namespace", err)
 	}
 
 	xdgRuntimeDir, err := homedir.GetRuntimeDir()

@@ -310,6 +310,7 @@ load helpers.network
 }
 
 # CANNOT BE PARALLELIZED due to iptables/nft commands
+# bats test_tags=distro-integration
 @test "podman network reload" {
     skip_if_remote "podman network reload does not have remote support"
 
@@ -582,6 +583,14 @@ load helpers.network
     run_podman network connect $netname $background_cid
     is "$output" "" "(re)connect of container with no open ports"
 
+    # connect a network with an intentional error (bad mac address)
+    run_podman 125 network connect --mac-address 00:00:00:00:00:00 $netname2 $cid
+    assert "$output" =~ "Cannot assign requested address" "mac address error"
+
+    # podman inspect must still work correctly and not error due network desync
+    run_podman inspect --format '{{ range $index, $value := .NetworkSettings.Networks }}{{$index}}{{end}}' $cid
+    assert "$output" == "$netname" "only network1 must be connected"
+
     # connect a second network
     run_podman network connect $netname2 $cid
     is "$output" "" "Output should be empty (no errors)"
@@ -740,7 +749,6 @@ nameserver 8.8.8.8" "nameserver order is correct"
     fi
     # we should use the integrated dns server
     run_podman run --network $netname --rm $IMAGE cat /etc/resolv.conf
-    assert "$output" =~ "search dns.podman.*" "correct search domain"
     assert "$output" =~ ".*nameserver $subnet.1.*" \
            "integrated dns nameserver is set"
 
@@ -770,11 +778,7 @@ nameserver 8.8.8.8" "nameserver order is correct"
     fi
     # pasta only works rootless
     if is_rootless; then
-        if has_pasta; then
-            netmodes+=("pasta")
-        else
-            echo "# WARNING: pasta unavailable!" >&3
-        fi
+        netmodes+=("pasta")
     fi
 
     for netmode in "${netmodes[@]}"; do
@@ -790,7 +794,7 @@ nameserver 8.8.8.8" "nameserver order is correct"
         cid="$output"
 
         # make sure binding the same port fails
-        run timeout 5 nc -l 127.0.0.1 $port
+        run timeout 5 ncat -l 127.0.0.1 $port
         assert "$status" -eq 2 "ncat unexpected exit code"
         assert "$output" =~ "127.0.0.1:$port: Address already in use" "ncat error message"
 
@@ -802,10 +806,7 @@ nameserver 8.8.8.8" "nameserver order is correct"
             # port is bound in the container, https://github.com/containers/podman/issues/21561.
             retries=5
             while [[ $retries -gt 0 ]]; do
-                # -w 1 adds a 1 second timeout. For some reason, ubuntu's ncat
-                # doesn't close the connection on EOF, and other options to
-                # change this are not portable across distros. -w seems to work.
-                run nc -w 1 127.0.0.1 $port <<<$random
+                run ncat 127.0.0.1 $port <<<$random
                 if [[ $status -eq 0 ]]; then
                     break
                 fi
@@ -901,11 +902,21 @@ EOF
 @test "podman network rm --dns-option " {
     dns_opt=dns$(random_string)
     run_podman run --rm --dns-opt=${dns_opt} $IMAGE cat /etc/resolv.conf
-    is "$output" ".*options ${dns_opt}" "--dns-opt was added"
+    # Note that we must fully replace all host option so make a match for line start/end as well
+    # https://github.com/containers/podman/issues/22399
+    assert "$output" =~ ".*^options ${dns_opt}\$" "--dns-opt was added"
 
     dns_opt=dns$(random_string)
     run_podman run --rm --dns-option=${dns_opt} $IMAGE cat /etc/resolv.conf
-    is "$output" ".*options ${dns_opt}" "--dns-option was added"
+    assert "$output" =~ ".*^options ${dns_opt}\$" "--dns-option was added"
+
+    # now check with a custom network as well
+    local net=net-$(safename)
+    run_podman network create $net
+    run_podman run --rm --network $net --dns-option=${dns_opt} $IMAGE cat /etc/resolv.conf
+    assert "$output" =~ ".*^options ${dns_opt}\$" "--dns-option was added with custom network"
+
+    run_podman network rm -f $net
 }
 
 # bats test_tags=ci:parallel
@@ -965,27 +976,6 @@ EOF
         echo "$_LOG_PROMPT ip netns delete $netns"
         ip netns delete $netns
      fi
-}
-
-function wait_for_restart_count() {
-    local cname="$1"
-    local count="$2"
-    local tname="$3"
-
-    local timeout=10
-    while :; do
-        # Previously this would fail as the container would run out of ips after 5 restarts.
-        run_podman inspect --format "{{.RestartCount}}" $cname
-        if [[ "$output" == "$2" ]]; then
-            break
-        fi
-
-        timeout=$((timeout - 1))
-        if [[ $timeout -eq 0 ]]; then
-            die "Timed out waiting for RestartCount with $tname"
-        fi
-        sleep 0.5
-    done
 }
 
 # Test for https://github.com/containers/podman/issues/18615
@@ -1107,7 +1097,6 @@ function wait_for_restart_count() {
 @test "Podman unshare --rootless-netns with Pasta" {
     skip_if_remote "unshare is local-only"
     skip_if_not_rootless "pasta networking only available in rootless mode"
-    skip_if_no_pasta "pasta not found; this test requires pasta"
 
     pasta_iface=$(default_ifname 4)
     assert "$pasta_iface" != "" "pasta_iface is set"

@@ -12,8 +12,8 @@ import (
 
 	"github.com/containers/common/internal/attributedstring"
 	"github.com/containers/common/libnetwork/types"
-	"github.com/containers/common/pkg/capabilities"
 	"github.com/containers/storage/pkg/fileutils"
+	"github.com/containers/storage/pkg/homedir"
 	"github.com/containers/storage/pkg/unshare"
 	units "github.com/docker/go-units"
 	selinux "github.com/opencontainers/selinux/go-selinux"
@@ -96,6 +96,13 @@ type ContainersConfig struct {
 	// "memory.high=1073741824" sets the memory.high limit to 1GB.
 	CgroupConf attributedstring.Slice `toml:"cgroup_conf,omitempty"`
 
+	// When no hostname is set for a container, use the container's name, with
+	// characters not valid for a hostname removed, as the hostname instead of
+	// the first 12 characters of the container's ID. Containers not running
+	// in a private UTS namespace will have their hostname set to the host's
+	// hostname regardless of this setting.
+	ContainerNameAsHostName bool `toml:"container_name_as_hostname,omitempty"`
+
 	// Capabilities to add to all containers.
 	DefaultCapabilities attributedstring.Slice `toml:"default_capabilities,omitempty"`
 
@@ -164,6 +171,9 @@ type ContainersConfig struct {
 
 	// LogDriver  for the container.  For example: k8s-file and journald
 	LogDriver string `toml:"log_driver,omitempty"`
+
+	// LogPath is the path to the container log file.
+	LogPath string `toml:"log_path,omitempty"`
 
 	// LogSizeMax is the maximum number of bytes after which the log file
 	// will be truncated. It can be expressed as a human-friendly string
@@ -733,7 +743,13 @@ func (c *Config) CheckCgroupsAndAdjustConfig() {
 
 	session, found := os.LookupEnv("DBUS_SESSION_BUS_ADDRESS")
 	if !found {
-		sessionAddr := filepath.Join(os.Getenv("XDG_RUNTIME_DIR"), "bus")
+		xdgRuntimeDir := os.Getenv("XDG_RUNTIME_DIR")
+		if xdgRuntimeDir == "" {
+			if dir, err := homedir.GetRuntimeDir(); err == nil {
+				xdgRuntimeDir = dir
+			}
+		}
+		sessionAddr := filepath.Join(xdgRuntimeDir, "bus")
 		if err := fileutils.Exists(sessionAddr); err == nil {
 			sessionAddr, err = filepath.EvalSymlinks(sessionAddr)
 			if err == nil {
@@ -834,8 +850,7 @@ func (c *EngineConfig) Validate() error {
 	}
 	// Check if the pullPolicy from containers.conf is valid
 	// if it is invalid returns the error
-	pullPolicy := strings.ToLower(c.PullPolicy)
-	if _, err := ValidatePullPolicy(pullPolicy); err != nil {
+	if _, err := ParsePullPolicy(c.PullPolicy); err != nil {
 		return fmt.Errorf("invalid pull type from containers.conf %q: %w", c.PullPolicy, err)
 	}
 
@@ -867,6 +882,10 @@ func (c *ContainersConfig) Validate() error {
 	}
 
 	if err := c.validateUmask(); err != nil {
+		return err
+	}
+
+	if err := c.validateLogPath(); err != nil {
 		return err
 	}
 
@@ -963,24 +982,6 @@ func (c *Config) GetDefaultEnvEx(envHost, httpProxy bool) []string {
 		}
 	}
 	return append(env, c.Containers.Env.Get()...)
-}
-
-// Capabilities returns the capabilities parses the Add and Drop capability
-// list from the default capabilities for the container
-func (c *Config) Capabilities(user string, addCapabilities, dropCapabilities []string) ([]string, error) {
-	userNotRoot := func(user string) bool {
-		if user == "" || user == "root" || user == "0" {
-			return false
-		}
-		return true
-	}
-
-	defaultCapabilities := c.Containers.DefaultCapabilities.Get()
-	if userNotRoot(user) {
-		defaultCapabilities = []string{}
-	}
-
-	return capabilities.MergeCapabilities(defaultCapabilities, addCapabilities, dropCapabilities)
 }
 
 // Device parses device mapping string to a src, dest & permissions string

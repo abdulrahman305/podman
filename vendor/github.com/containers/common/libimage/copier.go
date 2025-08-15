@@ -21,8 +21,10 @@ import (
 	"github.com/containers/image/v5/signature"
 	"github.com/containers/image/v5/signature/signer"
 	storageTransport "github.com/containers/image/v5/storage"
+	"github.com/containers/image/v5/transports"
 	"github.com/containers/image/v5/types"
 	encconfig "github.com/containers/ocicrypt/config"
+	"github.com/containers/storage"
 	"github.com/sirupsen/logrus"
 )
 
@@ -160,8 +162,8 @@ type CopyOptions struct {
 	extendTimeoutSocket string
 }
 
-// copier is an internal helper to conveniently copy images.
-type copier struct {
+// Copier is a helper to conveniently copy images.
+type Copier struct {
 	extendTimeoutSocket string
 	imageCopyOptions    copy.Options
 	retryOptions        retry.Options
@@ -170,6 +172,13 @@ type copier struct {
 
 	sourceLookup      LookupReferenceFunc
 	destinationLookup LookupReferenceFunc
+}
+
+// newCopier creates a Copier based on a runtime's system context.
+// Note that fields in options *may* overwrite the counterparts of
+// the specified system context.  Please make sure to call `(*Copier).Close()`.
+func (r *Runtime) newCopier(options *CopyOptions) (*Copier, error) {
+	return NewCopier(options, r.SystemContext())
 }
 
 // storageAllowedPolicyScopes overrides the policy for local storage
@@ -213,17 +222,14 @@ func getDockerAuthConfig(name, passwd, creds, idToken string) (*types.DockerAuth
 	}
 }
 
-// NewCopier is a simple, exported wrapper for newCopier
-func NewCopier(options *CopyOptions, sc *types.SystemContext) (*copier, error) {
-	return newCopier(options, sc)
-}
+// NewCopier creates a Copier based on a provided system context.
+// Note that fields in options *may* overwrite the counterparts of
+// the specified system context.  Please make sure to call `(*Copier).Close()`.
+func NewCopier(options *CopyOptions, sc *types.SystemContext) (*Copier, error) {
+	c := Copier{extendTimeoutSocket: options.extendTimeoutSocket}
+	sysContextCopy := *sc
+	c.systemContext = &sysContextCopy
 
-// newCopier creates a copier.  Note that fields in options *may* overwrite the
-// counterparts of the specified system context.  Please make sure to call
-// `(*copier).close()`.
-func newCopier(options *CopyOptions, sc *types.SystemContext) (*copier, error) {
-	c := copier{extendTimeoutSocket: options.extendTimeoutSocket}
-	c.systemContext = sc
 	if options.SourceLookupReferenceFunc != nil {
 		c.sourceLookup = options.SourceLookupReferenceFunc
 	}
@@ -337,22 +343,20 @@ func newCopier(options *CopyOptions, sc *types.SystemContext) (*copier, error) {
 	return &c, nil
 }
 
-// newCopier creates a copier.  Note that fields in options *may* overwrite the
-// counterparts of the specified system context.  Please make sure to call
-// `(*copier).close()`.
-func (r *Runtime) newCopier(options *CopyOptions) (*copier, error) {
-	sc := r.systemContextCopy()
-	return newCopier(options, sc)
-}
-
 // Close open resources.
-func (c *copier) Close() error {
+func (c *Copier) Close() error {
 	return c.policyContext.Destroy()
 }
 
 // Copy the source to the destination.  Returns the bytes of the copied
 // manifest which may be used for digest computation.
-func (c *copier) Copy(ctx context.Context, source, destination types.ImageReference) ([]byte, error) {
+func (c *Copier) Copy(ctx context.Context, source, destination types.ImageReference) ([]byte, error) {
+	return c.copyInternal(ctx, source, destination, nil)
+}
+
+// Copy the source to the destination.  Returns the bytes of the copied
+// manifest which may be used for digest computation.
+func (c *Copier) copyInternal(ctx context.Context, source, destination types.ImageReference, reportResolvedReference *types.ImageReference) ([]byte, error) {
 	logrus.Debugf("Copying source image %s to destination image %s", source.StringWithinTransport(), destination.StringWithinTransport())
 
 	// Avoid running out of time when running inside a systemd unit by
@@ -457,6 +461,11 @@ func (c *copier) Copy(ctx context.Context, source, destination types.ImageRefere
 	var returnManifest []byte
 	f := func() error {
 		opts := c.imageCopyOptions
+		// This is already set when `newCopier` was called but there is an option
+		// to override it by callers if needed.
+		if reportResolvedReference != nil {
+			opts.ReportResolvedReference = reportResolvedReference
+		}
 		if sourceInsecure != nil {
 			value := types.NewOptionalBool(*sourceInsecure)
 			opts.SourceCtx.DockerInsecureSkipTLSVerify = value
@@ -473,6 +482,22 @@ func (c *copier) Copy(ctx context.Context, source, destination types.ImageRefere
 		return err
 	}
 	return returnManifest, retry.IfNecessary(ctx, f, &c.retryOptions)
+}
+
+func (c *Copier) copyToStorage(ctx context.Context, source, destination types.ImageReference) (*storage.Image, error) {
+	var resolvedReference types.ImageReference
+	_, err := c.copyInternal(ctx, source, destination, &resolvedReference)
+	if err != nil {
+		return nil, fmt.Errorf("unable to copy from source %s: %w", transports.ImageName(source), err)
+	}
+	if resolvedReference == nil {
+		return nil, fmt.Errorf("internal error: After attempting to copy %s, resolvedReference is nil", source)
+	}
+	_, image, err := storageTransport.ResolveReference(resolvedReference)
+	if err != nil {
+		return nil, fmt.Errorf("resolving an already-resolved reference %q to the pulled image: %w", transports.ImageName(resolvedReference), err)
+	}
+	return image, nil
 }
 
 // checkRegistrySourcesAllows checks the $BUILD_REGISTRY_SOURCES environment

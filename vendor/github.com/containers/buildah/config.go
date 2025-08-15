@@ -4,11 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"os"
-	"runtime"
+	"slices"
 	"strings"
 	"time"
 
+	"github.com/containerd/platforms"
 	"github.com/containers/buildah/define"
 	"github.com/containers/buildah/docker"
 	internalUtil "github.com/containers/buildah/internal/util"
@@ -19,14 +21,12 @@ import (
 	"github.com/containers/storage/pkg/stringid"
 	ociv1 "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/sirupsen/logrus"
-	"golang.org/x/exp/maps"
-	"golang.org/x/exp/slices"
 )
 
 // unmarshalConvertedConfig obtains the config blob of img valid for the wantedManifestMIMEType format
 // (either as it exists, or converting the image if necessary), and unmarshals it into dest.
 // NOTE: The MIME type is of the _manifest_, not of the _config_ that is returned.
-func unmarshalConvertedConfig(ctx context.Context, dest interface{}, img types.Image, wantedManifestMIMEType string) error {
+func unmarshalConvertedConfig(ctx context.Context, dest any, img types.Image, wantedManifestMIMEType string) error {
 	_, actualManifestMIMEType, err := img.Manifest(ctx)
 	if err != nil {
 		return fmt.Errorf("getting manifest MIME type for %q: %w", transports.ImageName(img.Reference()), err)
@@ -61,7 +61,7 @@ func unmarshalConvertedConfig(ctx context.Context, dest interface{}, img types.I
 	return nil
 }
 
-func (b *Builder) initConfig(ctx context.Context, img types.Image, sys *types.SystemContext) error {
+func (b *Builder) initConfig(ctx context.Context, sys *types.SystemContext, img types.Image, options *BuilderOptions) error {
 	if img != nil { // A pre-existing image, as opposed to a "FROM scratch" new one.
 		rawManifest, manifestMIMEType, err := img.Manifest(ctx)
 		if err != nil {
@@ -96,9 +96,22 @@ func (b *Builder) initConfig(ctx context.Context, img types.Image, sys *types.Sy
 				if b.ImageAnnotations == nil {
 					b.ImageAnnotations = make(map[string]string, len(v1Manifest.Annotations))
 				}
-				for k, v := range v1Manifest.Annotations {
-					b.ImageAnnotations[k] = v
-				}
+				maps.Copy(b.ImageAnnotations, v1Manifest.Annotations)
+			}
+		}
+	} else {
+		if options == nil || options.CompatScratchConfig != types.OptionalBoolTrue {
+			b.Docker = docker.V2Image{
+				V1Image: docker.V1Image{
+					Config: &docker.Config{
+						WorkingDir: "/",
+					},
+				},
+			}
+			b.OCIv1 = ociv1.Image{
+				Config: ociv1.ImageConfig{
+					WorkingDir: "/",
+				},
 			}
 		}
 	}
@@ -122,27 +135,21 @@ func (b *Builder) fixupConfig(sys *types.SystemContext) {
 	if b.OCIv1.Created == nil || b.OCIv1.Created.IsZero() {
 		b.OCIv1.Created = &now
 	}
+	currentPlatformSpecification := platforms.DefaultSpec()
 	if b.OS() == "" {
 		if sys != nil && sys.OSChoice != "" {
 			b.SetOS(sys.OSChoice)
 		} else {
-			b.SetOS(runtime.GOOS)
+			b.SetOS(currentPlatformSpecification.OS)
 		}
 	}
 	if b.Architecture() == "" {
 		if sys != nil && sys.ArchitectureChoice != "" {
 			b.SetArchitecture(sys.ArchitectureChoice)
-		} else {
-			b.SetArchitecture(runtime.GOARCH)
-		}
-		// in case the arch string we started with was shorthand for a known arch+variant pair, normalize it
-		ps := internalUtil.NormalizePlatform(ociv1.Platform{OS: b.OS(), Architecture: b.Architecture(), Variant: b.Variant()})
-		b.SetArchitecture(ps.Architecture)
-		b.SetVariant(ps.Variant)
-	}
-	if b.Variant() == "" {
-		if sys != nil && sys.VariantChoice != "" {
 			b.SetVariant(sys.VariantChoice)
+		} else {
+			b.SetArchitecture(currentPlatformSpecification.Architecture)
+			b.SetVariant(currentPlatformSpecification.Variant)
 		}
 		// in case the arch string we started with was shorthand for a known arch+variant pair, normalize it
 		ps := internalUtil.NormalizePlatform(ociv1.Platform{OS: b.OS(), Architecture: b.Architecture(), Variant: b.Variant()})
@@ -752,4 +759,63 @@ func (b *Builder) AddAppendedEmptyLayer(created *time.Time, createdBy, author, c
 // to the committed image after the entry for the layer that we're adding.
 func (b *Builder) ClearAppendedEmptyLayers() {
 	b.AppendedEmptyLayers = nil
+}
+
+// AddPrependedLinkedLayer adds an item to the history that we'll create when
+// committing the image, optionally with a layer, after any history we inherit
+// from the base image, but before the history item that we'll use to describe
+// the new layer that we're adding.
+// The blobPath can be either the location of an uncompressed archive, or a
+// directory whose contents will be archived to use as a layer blob.  Leaving
+// blobPath empty is functionally similar to calling AddPrependedEmptyLayer().
+func (b *Builder) AddPrependedLinkedLayer(created *time.Time, createdBy, author, comment, blobPath string) {
+	if created != nil {
+		copiedTimestamp := *created
+		created = &copiedTimestamp
+	}
+	b.PrependedLinkedLayers = append(b.PrependedLinkedLayers, LinkedLayer{
+		BlobPath: blobPath,
+		History: ociv1.History{
+			Created:    created,
+			CreatedBy:  createdBy,
+			Author:     author,
+			Comment:    comment,
+			EmptyLayer: blobPath == "",
+		},
+	})
+}
+
+// ClearPrependedLinkedLayers clears the list of history entries that we'll add
+// the committed image before the layer that we're adding (if we're adding it).
+func (b *Builder) ClearPrependedLinkedLayers() {
+	b.PrependedLinkedLayers = nil
+}
+
+// AddAppendedLinkedLayer adds an item to the history that we'll create when
+// committing the image, optionally with a layer, after the history item that
+// we'll use to describe the new layer that we're adding.
+// The blobPath can be either the location of an uncompressed archive, or a
+// directory whose contents will be archived to use as a layer blob.  Leaving
+// blobPath empty is functionally similar to calling AddAppendedEmptyLayer().
+func (b *Builder) AddAppendedLinkedLayer(created *time.Time, createdBy, author, comment, blobPath string) {
+	if created != nil {
+		copiedTimestamp := *created
+		created = &copiedTimestamp
+	}
+	b.AppendedLinkedLayers = append(b.AppendedLinkedLayers, LinkedLayer{
+		BlobPath: blobPath,
+		History: ociv1.History{
+			Created:    created,
+			CreatedBy:  createdBy,
+			Author:     author,
+			Comment:    comment,
+			EmptyLayer: blobPath == "",
+		},
+	})
+}
+
+// ClearAppendedLinkedLayers clears the list of linked layers that we'll add to
+// the committed image after the layer that we're adding (if we're adding it).
+func (b *Builder) ClearAppendedLinkedLayers() {
+	b.AppendedLinkedLayers = nil
 }

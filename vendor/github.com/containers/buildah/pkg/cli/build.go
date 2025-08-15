@@ -12,6 +12,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -24,7 +26,6 @@ import (
 	"github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
-	"golang.org/x/exp/slices"
 )
 
 type BuildOptions struct {
@@ -60,7 +61,6 @@ func GenBuildOptions(c *cobra.Command, inputArgs []string, iopts BuildOptions) (
 		if c.Flag("dns-search").Changed {
 			return options, nil, nil, errors.New("the --dns-search option cannot be used with --network=none")
 		}
-
 	}
 	if c.Flag("tag").Changed {
 		tags = iopts.Tag
@@ -69,10 +69,8 @@ func GenBuildOptions(c *cobra.Command, inputArgs []string, iopts BuildOptions) (
 			tags = tags[1:]
 		}
 		if c.Flag("manifest").Changed {
-			for _, tag := range tags {
-				if tag == iopts.Manifest {
-					return options, nil, nil, errors.New("the same name must not be specified for both '--tag' and '--manifest'")
-				}
+			if slices.Contains(tags, iopts.Manifest) {
+				return options, nil, nil, errors.New("the same name must not be specified for both '--tag' and '--manifest'")
 			}
 		}
 	}
@@ -260,18 +258,30 @@ func GenBuildOptions(c *cobra.Command, inputArgs []string, iopts BuildOptions) (
 			return options, nil, nil, err
 		}
 	}
-	var timestamp *time.Time
+	var timestamp, sourceDateEpoch *time.Time
 	if c.Flag("timestamp").Changed {
 		t := time.Unix(iopts.Timestamp, 0).UTC()
 		timestamp = &t
 	}
-	if c.Flag("output").Changed {
-		buildOption, err := parse.GetBuildOutput(iopts.BuildOutput)
+	if iopts.SourceDateEpoch != "" {
+		u, err := strconv.ParseInt(iopts.SourceDateEpoch, 10, 64)
 		if err != nil {
-			return options, nil, nil, err
+			return options, nil, nil, fmt.Errorf("error parsing source-date-epoch offset %q: %w", iopts.SourceDateEpoch, err)
 		}
-		if buildOption.IsStdout {
-			iopts.Quiet = true
+		s := time.Unix(u, 0).UTC()
+		sourceDateEpoch = &s
+	}
+	if c.Flag("output").Changed {
+		for _, buildOutput := range iopts.BuildOutputs {
+			// if any of these go to stdout, we need to avoid
+			// interspersing our random output in with it
+			buildOption, err := parse.GetBuildOutput(buildOutput)
+			if err != nil {
+				return options, nil, nil, err
+			}
+			if buildOption.IsStdout {
+				iopts.Quiet = true
+			}
 		}
 	}
 	var confidentialWorkloadOptions define.ConfidentialWorkloadOptions
@@ -354,7 +364,7 @@ func GenBuildOptions(c *cobra.Command, inputArgs []string, iopts BuildOptions) (
 		Architecture:            systemContext.ArchitectureChoice,
 		Args:                    args,
 		BlobDirectory:           iopts.BlobCache,
-		BuildOutput:             iopts.BuildOutput,
+		BuildOutputs:            iopts.BuildOutputs,
 		CacheFrom:               cacheFrom,
 		CacheTo:                 cacheTo,
 		CacheTTL:                cacheTTL,
@@ -368,6 +378,7 @@ func GenBuildOptions(c *cobra.Command, inputArgs []string, iopts BuildOptions) (
 		Compression:             compression,
 		ConfigureNetwork:        networkPolicy,
 		ContextDirectory:        contextDir,
+		CreatedAnnotation:       types.NewOptionalBool(iopts.CreatedAnnotation),
 		Devices:                 iopts.Devices,
 		DropCapabilities:        iopts.CapDrop,
 		Err:                     stderr,
@@ -379,6 +390,8 @@ func GenBuildOptions(c *cobra.Command, inputArgs []string, iopts BuildOptions) (
 		IIDFile:                 iopts.Iidfile,
 		IgnoreFile:              iopts.IgnoreFile,
 		In:                      stdin,
+		InheritLabels:           types.NewOptionalBool(iopts.InheritLabels),
+		InheritAnnotations:      types.NewOptionalBool(iopts.InheritAnnotations),
 		Isolation:               isolation,
 		Jobs:                    &iopts.Jobs,
 		Labels:                  iopts.Label,
@@ -403,6 +416,7 @@ func GenBuildOptions(c *cobra.Command, inputArgs []string, iopts BuildOptions) (
 		Quiet:                   iopts.Quiet,
 		RemoveIntermediateCtrs:  iopts.Rm,
 		ReportWriter:            reporter,
+		RewriteTimestamp:        iopts.RewriteTimestamp,
 		Runtime:                 iopts.Runtime,
 		RuntimeArgs:             runtimeFlags,
 		RusageLogFile:           iopts.RusageLogFile,
@@ -410,6 +424,7 @@ func GenBuildOptions(c *cobra.Command, inputArgs []string, iopts BuildOptions) (
 		SignBy:                  iopts.SignBy,
 		SignaturePolicyPath:     iopts.SignaturePolicy,
 		SkipUnusedStages:        types.NewOptionalBool(iopts.SkipUnusedStages),
+		SourceDateEpoch:         sourceDateEpoch,
 		Squash:                  iopts.Squash,
 		SystemContext:           systemContext,
 		Target:                  iopts.Target,
@@ -417,6 +432,7 @@ func GenBuildOptions(c *cobra.Command, inputArgs []string, iopts BuildOptions) (
 		TransientMounts:         iopts.Volumes,
 		UnsetEnvs:               iopts.UnsetEnvs,
 		UnsetLabels:             iopts.UnsetLabels,
+		UnsetAnnotations:        iopts.UnsetAnnotations,
 	}
 	if iopts.RetryDelay != "" {
 		options.PullPushRetryDelay, err = time.ParseDuration(iopts.RetryDelay)

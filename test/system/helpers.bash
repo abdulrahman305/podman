@@ -14,7 +14,7 @@ PODMAN_RUNTIME=
 PODMAN_TEST_IMAGE_REGISTRY=${PODMAN_TEST_IMAGE_REGISTRY:-"quay.io"}
 PODMAN_TEST_IMAGE_USER=${PODMAN_TEST_IMAGE_USER:-"libpod"}
 PODMAN_TEST_IMAGE_NAME=${PODMAN_TEST_IMAGE_NAME:-"testimage"}
-PODMAN_TEST_IMAGE_TAG=${PODMAN_TEST_IMAGE_TAG:-"20240123"}
+PODMAN_TEST_IMAGE_TAG=${PODMAN_TEST_IMAGE_TAG:-"20241011"}
 PODMAN_TEST_IMAGE_FQN="$PODMAN_TEST_IMAGE_REGISTRY/$PODMAN_TEST_IMAGE_USER/$PODMAN_TEST_IMAGE_NAME:$PODMAN_TEST_IMAGE_TAG"
 
 # Larger image containing systemd tools.
@@ -452,17 +452,6 @@ function clean_setup() {
     if [[ -z "$found_needed_image" ]]; then
         _prefetch $PODMAN_TEST_IMAGE_FQN
     fi
-
-    # Load (create, actually) the pause image. This way, all pod tests will
-    # have it available. Without this, pod tests run in parallel will leave
-    # behind <none>:<none> images.
-    # FIXME: we have to do this always, because there's no way (in bats 1.11)
-    #        to tell if we're running in parallel. See bats-core#998
-    # FIXME: #23292 -- this should not be necessary.
-    run_podman pod create mypod
-    run_podman pod rm mypod
-    # And now, we have a pause image, and each test does not
-    # need to build their own.
 }
 
 # END   setup/teardown tools
@@ -806,15 +795,6 @@ function journald_unavailable() {
     echo "WEIRD: 'journalctl -n 1' failed with a non-permission error:"
     echo "$output"
     return 1
-}
-
-# Returns the name of the local pause image.
-function pause_image() {
-    # This function is intended to be used as '$(pause_image)', i.e.
-    # our caller wants our output. run_podman() messes with output because
-    # it emits the command invocation to stdout, hence the redirection.
-    run_podman version --format "{{.Server.Version}}-{{.Server.Built}}" >/dev/null
-    echo "localhost/podman-pause:$output"
 }
 
 # Wait for the pod (1st arg) to transition into the state (2nd arg)
@@ -1264,11 +1244,14 @@ function safename() {
 # Return exec_pid hash files if exists, otherwise, return nothing
 #
 function find_exec_pid_files() {
-    run_podman info --format '{{.Store.RunRoot}}'
+    _run_podman_quiet info --format '{{.Store.GraphRoot}}'
     local storage_path="$output"
-    if [ -d $storage_path ]; then
-        find $storage_path -type f -iname 'exec_pid_*'
+
+    if [ ! -d "$storage_path" ]; then
+        echo "error: storage path does not exist"
     fi
+
+    find "$storage_path" -type f -iname 'exec_pid'
 }
 
 
@@ -1356,6 +1339,41 @@ function wait_for_command_output() {
 function make_random_file() {
     dd if=/dev/urandom of="$1" bs=1 count=${2:-$((${RANDOM} % 8192 + 1024))} status=none
 }
+
+###########################
+# ensure there is no mount point at the specified path
+###########################
+function ensure_no_mountpoint() {
+    local path="$1"
+    if findmnt "$path"; then
+        die "there is a mountpoint at $path"
+    fi
+}
+
+###########################
+# ensure container has been restarted requested times
+###########################
+function wait_for_restart_count() {
+    local cname="$1"
+    local count="$2"
+    local tname="$3"
+
+    local timeout=10
+    while :; do
+        # Previously this would fail as the container would run out of ips after 5 restarts.
+        run_podman inspect --format "{{.RestartCount}}" $cname
+        if [[ "$output" == "$2" ]]; then
+            break
+        fi
+
+        timeout=$((timeout - 1))
+        if [[ $timeout -eq 0 ]]; then
+            die "Timed out waiting for RestartCount with $tname"
+        fi
+        sleep 0.5
+    done
+}
+
 
 # END   miscellaneous tools
 ###############################################################################

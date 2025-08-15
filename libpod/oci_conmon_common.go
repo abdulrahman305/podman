@@ -34,6 +34,7 @@ import (
 	"github.com/containers/podman/v5/pkg/specgenutil"
 	"github.com/containers/podman/v5/pkg/util"
 	"github.com/containers/podman/v5/utils"
+	"github.com/containers/storage/pkg/idtools"
 	spec "github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/sirupsen/logrus"
 	"golang.org/x/sys/unix"
@@ -172,13 +173,15 @@ func hasCurrentUserMapped(ctr *Container) bool {
 	if len(ctr.config.IDMappings.UIDMap) == 0 && len(ctr.config.IDMappings.GIDMap) == 0 {
 		return true
 	}
-	uid := os.Geteuid()
-	for _, m := range ctr.config.IDMappings.UIDMap {
-		if uid >= m.HostID && uid < m.HostID+m.Size {
-			return true
+	containsID := func(id int, mappings []idtools.IDMap) bool {
+		for _, m := range mappings {
+			if id >= m.HostID && id < m.HostID+m.Size {
+				return true
+			}
 		}
+		return false
 	}
-	return false
+	return containsID(os.Geteuid(), ctr.config.IDMappings.UIDMap) && containsID(os.Getegid(), ctr.config.IDMappings.GIDMap)
 }
 
 // CreateContainer creates a container.
@@ -859,6 +862,11 @@ func (r *ConmonOCIRuntime) OOMFilePath(ctr *Container) (string, error) {
 	return filepath.Join(r.persistDir, ctr.ID(), "oom"), nil
 }
 
+// PersistDirectoryPath is the path to the container's persist directory.
+func (r *ConmonOCIRuntime) PersistDirectoryPath(ctr *Container) (string, error) {
+	return filepath.Join(r.persistDir, ctr.ID()), nil
+}
+
 // RuntimeInfo provides information on the runtime.
 func (r *ConmonOCIRuntime) RuntimeInfo() (*define.ConmonInfo, *define.OCIRuntimeInfo, error) {
 	runtimePackage := version.Package(r.path)
@@ -1334,10 +1342,7 @@ func (r *ConmonOCIRuntime) sharedConmonArgs(ctr *Container, cuuid, bundlePath, p
 	logrus.Debugf("%s messages will be logged to syslog", r.conmonPath)
 	args = append(args, "--syslog")
 
-	size := r.logSizeMax
-	if ctr.config.LogSize > 0 {
-		size = ctr.config.LogSize
-	}
+	size := ctr.LogSizeMax()
 	if size > 0 {
 		args = append(args, "--log-size-max", strconv.FormatInt(size, 10))
 	}
