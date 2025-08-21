@@ -14,7 +14,7 @@ require (
 	github.com/containers/buildah v1.41.0
 	github.com/containers/common v0.64.1-0.20250806164630-57def9601f3b
 	github.com/containers/conmon v2.0.20+incompatible
-	github.com/containers/gvisor-tap-vsock v0.8.6
+	github.com/containers/gvisor-tap-vsock v0.8.7
 	github.com/containers/image/v5 v5.36.1
 	github.com/containers/libhvee v0.10.0
 	github.com/containers/ocicrypt v1.2.1
@@ -39,7 +39,7 @@ require (
 	github.com/hashicorp/go-multierror v1.1.1
 	github.com/hugelgupf/p9 v0.3.1-0.20250420164440-abc96d20b308
 	github.com/json-iterator/go v1.1.12
-	github.com/kevinburke/ssh_config v1.2.0
+	github.com/kevinburke/ssh_config v1.4.0
 	github.com/klauspost/pgzip v1.2.6
 	github.com/linuxkit/virtsock v0.0.0-20241009230534-cb6a20cc0422
 	github.com/mattn/go-shellwords v1.0.12
@@ -67,7 +67,7 @@ require (
 	github.com/stretchr/testify v1.10.0
 	github.com/vbauerster/mpb/v8 v8.10.2
 	github.com/vishvananda/netlink v1.3.1
-	go.etcd.io/bbolt v1.4.2
+	go.etcd.io/bbolt v1.4.3
 	golang.org/x/crypto v0.41.0
 	golang.org/x/net v0.43.0
 	golang.org/x/sync v0.16.0
